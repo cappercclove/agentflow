@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AGENTFLOW // AI WORKFLOW SYSTEM</title>
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-header">
+        <h1 class="logo">AGENTFLOW</h1>
+        <p class="logo-subtitle">// AI WORKFLOW SYSTEM v1.0</p>
+      </div>
+      <nav class="nav-menu">
+        <div class="nav-item active" data-page="workflows" onclick="navigateTo('workflows')">
+          <span class="nav-icon"></span>
+          <span>[WORKFLOWS]</span>
+        </div>
+        <div class="nav-item" data-page="editor" onclick="navigateTo('editor')">
+          <span class="nav-icon"></span>
+          <span>[EDITOR]</span>
+        </div>
+        <div class="nav-item" data-page="templates" onclick="navigateTo('templates')">
+          <span class="nav-icon"></span>
+          <span>[TEMPLATES]</span>
+        </div>
+        <div class="nav-item" data-page="executions" onclick="navigateTo('executions')">
+          <span class="nav-icon"></span>
+          <span>[EXECUTIONS]</span>
+        </div>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="stats">
+          <div class="stat-item">
+            <div class="stat-value" id="stat-workflows">0</div>
+            <div class="stat-label">WORKFLOWS</div>
+          </div>
+          <div class="stat-item">
+            <div class="stat-value" id="stat-executions">0</div>
+            <div class="stat-label">EXEC_COUNT</div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <div class="topbar">
+        <h2 class="page-title" id="page-title">// WORKFLOWS</h2>
+        <div class="topbar-actions">
+          <button class="btn btn-primary" id="btn-new-workflow" onclick="showCreateModal()">
+            + NEW_WORKFLOW
+          </button>
+        </div>
+      </div>
+
+      <div class="content-area" id="content-area">
+        <!-- Dynamic content loaded here -->
+      </div>
+    </main>
+  </div>
+
+  <!-- Create Workflow Modal -->
+  <div class="modal" id="create-modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 class="modal-title">// NEW_WORKFLOW</h2>
+        <button class="modal-close" onclick="closeModal('create-modal')">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label class="form-label">NAME</label>
+          <input type="text" class="property-input" id="new-workflow-name" placeholder="Enter workflow name...">
+        </div>
+        <div class="form-group">
+          <label class="form-label">DESCRIPTION</label>
+          <textarea class="property-textarea" id="new-workflow-desc" placeholder="Describe workflow function..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('create-modal')">CANCEL</button>
+        <button class="btn btn-primary" onclick="createWorkflow()">EXECUTE</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Decompose Modal -->
+  <div class="modal" id="decompose-modal">
+    <div class="modal-content" style="max-width: 560px;">
+      <div class="modal-header">
+        <h2 class="modal-title">// AI_TASK_DECOMPOSE</h2>
+        <button class="modal-close" onclick="closeModal('decompose-modal')">×</button>
+      </div>
+      <div class="modal-body">
+        <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 12px;">
+          > INPUT_COMPLEX_TASK // AI WILL AUTO-DECOMPOSE INTO EXECUTABLE SUBTASKS
+        </p>
+        <div class="form-group">
+          <label class="form-label">TASK_INPUT</label>
+          <textarea class="property-textarea" id="decompose-input" placeholder="e.g. Analyze article sentiment, translate to English, generate summary..."></textarea>
+        </div>
+        <button class="btn btn-primary" onclick="runDecompose()" id="btn-decompose" style="width: 100%;">
+          > INITIATE_DECOMPOSE
+        </button>
+        <div id="decompose-result" style="margin-top: 16px;"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('decompose-modal')">CLOSE</button>
+        <button class="btn btn-primary" onclick="applyDecompose()" id="btn-apply-decompose" style="display:none;">
+          APPLY_TO_EDITOR
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container"></div>
+
+  <script src="/static/js/app.js"></script>
+  <script src="/static/js/editor.js"></script>
+  <script src="/static/js/templates.js"></script>
+</body>
+</html>
