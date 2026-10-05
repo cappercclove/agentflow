@@ -10,7 +10,7 @@ NODE_TYPES = {
     },
     "llm": {
         "label": "AI 对话",
-        "icon": "",
+        "icon": "🤖",
         "color": "#7c3aed",
         "inputs": ["input"],
         "outputs": ["output"],

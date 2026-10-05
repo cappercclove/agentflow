@@ -3,11 +3,13 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Deployed](https://img.shields.io/badge/Deployed-Aliyun%20SWAS-FF6A00?logo=alibabacloud)
+![Tests](https://img.shields.io/badge/tests-pytest-yellow?logo=pytest&logoColor=white)
 
 **可视化 AI 工作流编排平台** — 拖拽节点、连线编排，让 AI 代理自动执行复杂任务
 
 [English](#english) | [中文](#中文)
+
+![AgentFlow 工作流编辑器](docs/screenshots/editor.png)
 
 ---
 
@@ -29,7 +31,7 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Frontend (Glassmorphism UI)             │
+│                      Frontend  Web UI / Electron             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────┐  │
 │  │ Node Palette │  │   Canvas     │  │  Properties      │  │
 │  │  (Drag)      │─▶│  (SVG Edges) │  │  Panel           │  │
@@ -70,8 +72,10 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 | 数据库 | SQLite + SQLAlchemy |
 | 大语言模型 | 阿里云百炼 (qwen-turbo/plus/max) |
 | 实时通信 | WebSocket |
-| 前端 | 原生 HTML/CSS/JS (玻璃拟态暗色主题) |
-| 部署 | Docker + Aliyun SWAS |
+| 前端 | 原生 HTML/CSS/JS，无框架依赖 |
+| 桌面端 | Electron 打包为 Windows 安装包 |
+| 离线 | Service Worker + Web App Manifest |
+| 容器化 | Dockerfile（非 root 运行 + 健康检查）+ docker-compose |
 
 ### 🚀 快速开始
 
@@ -84,8 +88,8 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 
 ```bash
 # 1. 克隆项目
-git clone https://github.com/your-username/ai-agent-workflow.git
-cd ai-agent-workflow
+git clone https://github.com/cappercclove/agentflow.git
+cd agentflow
 
 # 2. 创建虚拟环境
 python -m venv venv
@@ -145,28 +149,34 @@ docker-compose up -d
 ###  项目结构
 
 ```
-ai-agent-workflow/
+agentflow/
 ├── backend/
-│   ├── main.py                 # FastAPI 应用入口
-│   ├── models.py               # 数据库模型
-│   ├── workflow_engine.py      # 工作流执行引擎
+│   ├── main.py                 # FastAPI 入口，REST + WebSocket 路由
+│   ├── models.py               # SQLAlchemy 数据模型
+│   ├── workflow_engine.py      # 执行引擎（含条件表达式解析）
 │   ├── llm_client.py           # 多模型 LLM 客户端
 │   ├── node_types.py           # 节点类型定义
-│   ├── requirements.txt        # Python 依赖
-│   ── .env.example            # 环境变量模板
-── frontend/
-│   ├── index.html              # 主页面
-│   ├── css/
-│   │   └── style.css           # 玻璃拟态暗色主题
-│   ── js/
-│       ├── app.js              # 主应用逻辑
-│       ├── editor.js           # 可视化编辑器
-│       └── templates.js        # 工作流模板
+│   ├── tests/                  # pytest 用例
+│   ├── requirements.txt
+│   └── .env.example            # 环境变量模板
+├── frontend/
+│   ├── index.html              # 单页应用入口
+│   ├── css/style.css
+│   ├── js/
+│   │   ├── app.js              # 视图切换与 API 调用
+│   │   ├── editor.js           # 可视化编辑器（拖拽 + SVG 连线）
+│   │   └── templates.js        # 内置工作流模板
+│   ├── icons/                  # 应用图标
+│   ├── manifest.json           # PWA 清单
+│   ├── sw.js                   # Service Worker 离线缓存
+│   └── offline.html            # 离线兜底页
+├── electron.js                 # 桌面端主进程（拉起后端 + 创建窗口）
+├── package.json                # Electron 打包配置
 ├── docs/
-│   └── sample_workflow.json    # 示例工作流
+│   ├── screenshots/            # 界面截图
+│   └── sample_workflow.json
 ├── Dockerfile
 ├── docker-compose.yml
-├── .gitignore
 ├── LICENSE
 └── README.md
 ```
@@ -202,8 +212,8 @@ AgentFlow is a visual AI workflow orchestration platform. Users build automation
 ###  Quick Start
 
 ```bash
-git clone https://github.com/your-username/ai-agent-workflow.git
-cd ai-agent-workflow
+git clone https://github.com/cappercclove/agentflow.git
+cd agentflow
 python -m venv venv && source venv/bin/activate
 pip install -r backend/requirements.txt
 cp backend/.env.example backend/.env  # Edit with your API Key
@@ -214,7 +224,7 @@ Visit `http://localhost:8000` for the web UI.
 
 ### ️ Tech Stack
 
-Python · FastAPI · SQLite · WebSocket · Alibaba Cloud Bailian LLM · Glassmorphism UI
+Python · FastAPI · SQLite · WebSocket · Alibaba Cloud Bailian LLM · Electron desktop shell
 
 ### 📄 License
 

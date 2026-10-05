@@ -1,7 +1,7 @@
 {
-  "name": "ai-agent-workflow",
+  "name": "agentflow",
   "version": "1.0.0",
-  "description": "![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green) ![Deployed](https://img.shields.io/badge/Deployed-Aliyun%20SWAS-FF6A00?logo=alibabacloud)",
+  "description": "Visual AI workflow orchestration platform with an Electron desktop shell",
   "main": "electron.js",
   "scripts": {
     "start": "electron .",
@@ -10,16 +10,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cappercclove/ai-agent-workflow.git"
+    "url": "git+https://github.com/cappercclove/agentflow.git"
   },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "cappercclove",
+  "license": "MIT",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/cappercclove/ai-agent-workflow/issues"
+    "url": "https://github.com/cappercclove/agentflow/issues"
   },
-  "homepage": "https://github.com/cappercclove/ai-agent-workflow#readme",
+  "homepage": "https://github.com/cappercclove/agentflow#readme",
   "build": {
     "appId": "com.agentflow.desktop",
     "productName": "AgentFlow",
