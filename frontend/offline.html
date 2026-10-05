@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AgentFlow - 离线</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'PingFang SC', sans-serif;
+      background: #fafafa;
+      color: #1a1a1a;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      -webkit-font-smoothing: antialiased;
+    }
+    .offline {
+      text-align: center;
+      padding: 40px 24px;
+      max-width: 380px;
+    }
+    .offline-icon {
+      width: 72px;
+      height: 72px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #6366f1, #818cf8);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      margin: 0 auto 24px;
+      box-shadow: 0 4px 16px rgba(99, 102, 241, 0.25);
+    }
+    .offline-icon svg {
+      width: 36px;
+      height: 36px;
+      stroke: white;
+      stroke-width: 1.8;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+    .offline h1 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      letter-spacing: -0.02em;
+    }
+    .offline p {
+      font-size: 14px;
+      color: #737373;
+      line-height: 1.6;
+      margin-bottom: 24px;
+    }
+    .offline button {
+      padding: 10px 24px;
+      border: none;
+      border-radius: 8px;
+      background: #6366f1;
+      color: white;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 150ms ease;
+    }
+    .offline button:hover {
+      background: #4f46e5;
+    }
+    .offline-hint {
+      margin-top: 16px;
+      font-size: 12px;
+      color: #a3a3a3;
+    }
+  </style>
+</head>
+<body>
+  <div class="offline">
+    <div class="offline-icon">
+      <svg viewBox="0 0 24 24">
+        <path d="M1 1l22 22"/>
+        <path d="M16.72 11.06A10.94 10.94 0 0119 12.55"/>
+        <path d="M5 12.55a10.94 10.94 0 015.17-2.39"/>
+        <path d="M10.71 5.05A16 16 0 0122.58 10"/>
+        <path d="M1.42 9a15.91 15.91 0 014.7-2.84"/>
+        <path d="M8.53 16.11a6 6 0 016.95 0"/>
+        <line x1="12" y1="20" x2="12.01" y2="20"/>
+      </svg>
+    </div>
+    <h1>当前处于离线状态</h1>
+    <p>无法连接到 AgentFlow 服务器，请检查网络连接后重试。</p>
+    <button onclick="location.reload()">重新连接</button>
+    <div class="offline-hint">部分已缓存的页面内容仍可离线查看</div>
+  </div>
+</body>
+</html>

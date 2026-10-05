@@ -1,0 +1,51 @@
+{
+  "name": "ai-agent-workflow",
+  "version": "1.0.0",
+  "description": "![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white) ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white) ![License](https://img.shields.io/badge/License-MIT-green) ![Deployed](https://img.shields.io/badge/Deployed-Aliyun%20SWAS-FF6A00?logo=alibabacloud)",
+  "main": "electron.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cappercclove/ai-agent-workflow.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/cappercclove/ai-agent-workflow/issues"
+  },
+  "homepage": "https://github.com/cappercclove/ai-agent-workflow#readme",
+  "build": {
+    "appId": "com.agentflow.desktop",
+    "productName": "AgentFlow",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron.js",
+      "frontend/**/*",
+      "backend/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "frontend/icons/icon-512.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3"
+  }
+}
