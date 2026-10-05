@@ -5,6 +5,56 @@ let draggingNode = null;
 let dragOffset = { x: 0, y: 0 };
 let connectingPort = null;
 let nodeTypes = {};
+let history = [];
+let historyIndex = -1;
+const MAX_HISTORY = 50;
+
+function pushHistory() {
+  const state = {
+    nodes: JSON.parse(JSON.stringify(editorNodes)),
+    edges: JSON.parse(JSON.stringify(editorEdges)),
+  };
+  history = history.slice(0, historyIndex + 1);
+  history.push(state);
+  if (history.length > MAX_HISTORY) history.shift();
+  historyIndex = history.length - 1;
+}
+
+function undo() {
+  if (historyIndex <= 0) return;
+  historyIndex--;
+  const state = history[historyIndex];
+  editorNodes = JSON.parse(JSON.stringify(state.nodes));
+  editorEdges = JSON.parse(JSON.stringify(state.edges));
+  selectedNode = null;
+  renderCanvas();
+  saveWorkflow();
+  document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
+}
+
+function redo() {
+  if (historyIndex >= history.length - 1) return;
+  historyIndex++;
+  const state = history[historyIndex];
+  editorNodes = JSON.parse(JSON.stringify(state.nodes));
+  editorEdges = JSON.parse(JSON.stringify(state.edges));
+  selectedNode = null;
+  renderCanvas();
+  saveWorkflow();
+  document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
+    e.preventDefault();
+    undo();
+  }
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.shiftKey && e.key === 'z'))) {
+    e.preventDefault();
+    redo();
+  }
+});
 
 async function initEditor() {
   const res = await fetch(`${API}/api/node-types`);
@@ -21,21 +71,22 @@ async function initEditor() {
 
   renderCanvas();
   setupCanvasEvents();
+  pushHistory();
 }
 
 function renderPalette() {
   const palette = document.getElementById('node-palette');
   if (!palette) return;
 
-  palette.innerHTML = '<div class="palette-header">> NODE_TYPES</div>';
+  palette.innerHTML = '<div class="palette-header">节点类型</div>';
 
   Object.entries(nodeTypes).forEach(([type, info]) => {
     const el = document.createElement('div');
     el.className = 'node-type-item';
     el.draggable = true;
     el.innerHTML = `
-      <span class="node-type-icon" style="color: ${info.color}; text-shadow: 0 0 10px ${info.color};">${info.icon}</span>
-      <span>[${info.label}]</span>
+      <span class="node-type-icon" style="color: ${info.color}; background: ${info.color}14;">${info.icon}</span>
+      <span>${info.label}</span>
     `;
     el.addEventListener('dragstart', (e) => {
       e.dataTransfer.setData('node-type', type);
@@ -50,12 +101,13 @@ function renderCanvas() {
   if (!canvas || !svg) return;
 
   canvas.querySelectorAll('.workflow-node').forEach(n => n.remove());
-  renderEdges(svg);
 
   editorNodes.forEach(node => {
     const el = createNodeElement(node);
     canvas.appendChild(el);
   });
+
+  renderEdges(svg);
 }
 
 function createNodeElement(node) {
@@ -65,21 +117,22 @@ function createNodeElement(node) {
   el.dataset.id = node.id;
   el.style.left = node.x + 'px';
   el.style.top = node.y + 'px';
-  el.style.borderColor = info.color;
-  el.style.color = info.color;
+  el.style.setProperty('--node-color', info.color);
 
   const hasInput = info.inputs && info.inputs.length > 0;
   const hasOutput = info.outputs && info.outputs.length > 0;
 
+  const configHint = node.config?.model ? node.config.model.replace('qwen-', 'Qwen ') : '';
+
   el.innerHTML = `
-    <div class="node-header" style="border-bottom-color: ${info.color}40;">
-      <span class="node-icon" style="color: ${info.color}; text-shadow: 0 0 10px ${info.color};">${info.icon}</span>
-      <span>${escapeHtml(node.title || info.label)}</span>
+    <div class="node-header">
+      <span class="node-icon" style="color: ${info.color}; background: ${info.color}14; width: 26px; height: 26px; display: flex; align-items: center; justify-content: center; border-radius: 7px; font-size: 14px;">${info.icon}</span>
+      <span style="flex:1;">${escapeHtml(node.title || info.label)}</span>
     </div>
-    <div class="node-body">[${info.label}]</div>
+    ${configHint ? `<div class="node-body">${configHint}</div>` : ''}
     <div class="node-ports">
-      ${hasInput ? '<div class="node-port" data-node="' + node.id + '" data-port="input" style="border-color: ' + info.color + ';"></div>' : '<div></div>'}
-      ${hasOutput ? '<div class="node-port" data-node="' + node.id + '" data-port="output" style="border-color: ' + info.color + ';"></div>' : '<div></div>'}
+      ${hasInput ? '<div class="node-port" data-node="' + node.id + '" data-port="input"></div>' : '<div></div>'}
+      ${hasOutput ? '<div class="node-port" data-node="' + node.id + '" data-port="output"></div>' : '<div></div>'}
     </div>
   `;
 
@@ -101,7 +154,8 @@ function createNodeElement(node) {
 
       if (!connectingPort) {
         connectingPort = { nodeId, portType };
-        port.style.background = port.style.borderColor;
+        const nodeColor = el.style.getPropertyValue('--node-color');
+        port.style.background = nodeColor;
       } else {
         if (connectingPort.nodeId !== nodeId && connectingPort.portType !== portType) {
           const source = connectingPort.portType === 'output' ? connectingPort.nodeId : nodeId;
@@ -109,6 +163,7 @@ function createNodeElement(node) {
 
           const exists = editorEdges.some(e => e.source === source && e.target === target);
           if (!exists) {
+            pushHistory();
             editorEdges.push({ source, target });
             renderCanvas();
             saveWorkflow();
@@ -157,12 +212,18 @@ function renderEdges(svg) {
     pathEl.dataset.index = i;
 
     pathEl.addEventListener('click', () => {
+      pushHistory();
       editorEdges.splice(i, 1);
       renderCanvas();
       saveWorkflow();
     });
 
     svg.appendChild(pathEl);
+
+    const flowEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    flowEl.setAttribute('d', path);
+    flowEl.setAttribute('class', 'edge-flow');
+    svg.appendChild(flowEl);
   });
 }
 
@@ -194,45 +255,48 @@ function setupCanvasEvents() {
     };
 
     editorNodes.push(node);
+    pushHistory();
     renderCanvas();
     saveWorkflow();
-  });
-
-  document.addEventListener('mousemove', (e) => {
-    if (!draggingNode) return;
-
-    const canvas = document.getElementById('canvas');
-    const canvasRect = canvas.getBoundingClientRect();
-    const x = e.clientX - canvasRect.left - dragOffset.x;
-    const y = e.clientY - canvasRect.top - dragOffset.y;
-
-    draggingNode.x = Math.max(0, x);
-    draggingNode.y = Math.max(0, y);
-
-    const el = document.querySelector(`.workflow-node[data-id="${draggingNode.id}"]`);
-    if (el) {
-      el.style.left = draggingNode.x + 'px';
-      el.style.top = draggingNode.y + 'px';
-    }
-
-    renderEdges(document.getElementById('svg-layer'));
-  });
-
-  document.addEventListener('mouseup', () => {
-    if (draggingNode) {
-      saveWorkflow();
-    }
-    draggingNode = null;
   });
 
   canvas.addEventListener('click', (e) => {
     if (e.target === canvas || e.target.id === 'svg-layer') {
       selectedNode = null;
       document.querySelectorAll('.workflow-node').forEach(n => n.classList.remove('selected'));
-      document.getElementById('prop-content').innerHTML = '<p style="font-size: 12px; color: var(--text-muted);">> SELECT_NODE_TO_INSPECT</p>';
+      document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
     }
   });
 }
+
+document.addEventListener('mousemove', (e) => {
+  if (!draggingNode) return;
+
+  const canvas = document.getElementById('canvas');
+  if (!canvas) return;
+  const canvasRect = canvas.getBoundingClientRect();
+  const x = e.clientX - canvasRect.left - dragOffset.x;
+  const y = e.clientY - canvasRect.top - dragOffset.y;
+
+  draggingNode.x = Math.max(0, x);
+  draggingNode.y = Math.max(0, y);
+
+  const el = document.querySelector(`.workflow-node[data-id="${draggingNode.id}"]`);
+  if (el) {
+    el.style.left = draggingNode.x + 'px';
+    el.style.top = draggingNode.y + 'px';
+  }
+
+  renderEdges(document.getElementById('svg-layer'));
+});
+
+document.addEventListener('mouseup', () => {
+  if (draggingNode) {
+    pushHistory();
+    saveWorkflow();
+  }
+  draggingNode = null;
+});
 
 function selectNode(nodeId) {
   selectedNode = nodeId;
@@ -248,15 +312,15 @@ function selectNode(nodeId) {
 
   let html = `
     <div class="property-group">
-      <label class="property-label">NODE_ID</label>
+      <label class="property-label">节点 ID</label>
       <input type="text" class="property-input" value="${node.id}" disabled style="opacity: 0.5;">
     </div>
     <div class="property-group">
-      <label class="property-label">TITLE</label>
+      <label class="property-label">标题</label>
       <input type="text" class="property-input" id="prop-title" value="${escapeHtml(node.title || '')}" oninput="updateNodeProp('${nodeId}', 'title', this.value)">
     </div>
     <div class="property-group">
-      <label class="property-label">TYPE</label>
+      <label class="property-label">类型</label>
       <input type="text" class="property-input" value="${info.label || node.type}" disabled style="opacity: 0.5;">
     </div>
   `;
@@ -265,7 +329,7 @@ function selectNode(nodeId) {
     if (node.config.prompt !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">PROMPT</label>
+          <label class="property-label">提示词</label>
           <textarea class="property-textarea" id="prop-prompt" oninput="updateNodeConfig('${nodeId}', 'prompt', this.value)">${escapeHtml(node.config.prompt)}</textarea>
         </div>
       `;
@@ -273,11 +337,11 @@ function selectNode(nodeId) {
     if (node.config.model !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">MODEL</label>
+          <label class="property-label">模型</label>
           <select class="property-select" id="prop-model" onchange="updateNodeConfig('${nodeId}', 'model', this.value)">
-            <option value="qwen-turbo" ${node.config.model === 'qwen-turbo' ? 'selected' : ''}>QWEN-TURBO [FAST]</option>
-            <option value="qwen-plus" ${node.config.model === 'qwen-plus' ? 'selected' : ''}>QWEN-PLUS [BALANCED]</option>
-            <option value="qwen-max" ${node.config.model === 'qwen-max' ? 'selected' : ''}>QWEN-MAX [POWER]</option>
+            <option value="qwen-turbo" ${node.config.model === 'qwen-turbo' ? 'selected' : ''}>Qwen Turbo（快速）</option>
+            <option value="qwen-plus" ${node.config.model === 'qwen-plus' ? 'selected' : ''}>Qwen Plus（均衡）</option>
+            <option value="qwen-max" ${node.config.model === 'qwen-max' ? 'selected' : ''}>Qwen Max（强力）</option>
           </select>
         </div>
       `;
@@ -285,16 +349,16 @@ function selectNode(nodeId) {
     if (node.config.temperature !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">TEMPERATURE: ${node.config.temperature}</label>
-          <input type="range" class="property-input" min="0" max="1" step="0.1" value="${node.config.temperature}" 
-            oninput="updateNodeConfig('${nodeId}', 'temperature', parseFloat(this.value)); this.previousElementSibling.textContent = 'TEMPERATURE: ' + this.value">
+          <label class="property-label">温度：${node.config.temperature}</label>
+          <input type="range" class="property-input" min="0" max="1" step="0.1" value="${node.config.temperature}"
+            oninput="updateNodeConfig('${nodeId}', 'temperature', parseFloat(this.value)); this.previousElementSibling.textContent = '温度：' + this.value">
         </div>
       `;
     }
     if (node.config.url !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">URL</label>
+          <label class="property-label">请求地址</label>
           <input type="text" class="property-input" value="${escapeHtml(node.config.url)}" oninput="updateNodeConfig('${nodeId}', 'url', this.value)">
         </div>
       `;
@@ -302,7 +366,7 @@ function selectNode(nodeId) {
     if (node.config.method !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">METHOD</label>
+          <label class="property-label">请求方法</label>
           <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'method', this.value)">
             <option value="GET" ${node.config.method === 'GET' ? 'selected' : ''}>GET</option>
             <option value="POST" ${node.config.method === 'POST' ? 'selected' : ''}>POST</option>
@@ -313,7 +377,7 @@ function selectNode(nodeId) {
     if (node.config.condition !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">CONDITION_EXPR</label>
+          <label class="property-label">条件表达式</label>
           <input type="text" class="property-input" value="${escapeHtml(node.config.condition)}" oninput="updateNodeConfig('${nodeId}', 'condition', this.value)">
         </div>
       `;
@@ -321,8 +385,8 @@ function selectNode(nodeId) {
   }
 
   html += `
-    <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--accent-cyan);">
-      <button class="btn btn-danger" onclick="deleteNode('${nodeId}')" style="width: 100%;">> DELETE_NODE</button>
+    <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
+      <button class="btn btn-danger" onclick="deleteNode('${nodeId}')" style="width: 100%;">删除节点</button>
     </div>
   `;
 
@@ -347,12 +411,13 @@ function updateNodeConfig(nodeId, key, value) {
 }
 
 function deleteNode(nodeId) {
+  pushHistory();
   editorNodes = editorNodes.filter(n => n.id !== nodeId);
   editorEdges = editorEdges.filter(e => e.source !== nodeId && e.target !== nodeId);
   selectedNode = null;
   renderCanvas();
   saveWorkflow();
-  document.getElementById('prop-content').innerHTML = '<p style="font-size: 12px; color: var(--text-muted);">> SELECT_NODE_TO_INSPECT</p>';
+  document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
 }
 
 async function saveWorkflow() {
@@ -374,7 +439,7 @@ async function saveWorkflow() {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: currentWorkflow.name || 'UNNAMED_WORKFLOW',
+        name: currentWorkflow.name || '未命名工作流',
         description: currentWorkflow.description || '',
         nodes: editorNodes,
         edges: editorEdges,

@@ -3,120 +3,131 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>AGENTFLOW // AI WORKFLOW SYSTEM</title>
+  <title>AgentFlow - AI 工作流平台</title>
   <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#6366f1">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="AgentFlow">
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png">
 </head>
 <body>
   <div class="app">
-    <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-header">
-        <h1 class="logo">AGENTFLOW</h1>
-        <p class="logo-subtitle">// AI WORKFLOW SYSTEM v1.0</p>
+        <h1 class="logo">
+          <span class="logo-mark"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h6M14 6h6M4 12h6M14 12h6M4 18h6M14 18h6"/><circle cx="12" cy="6" r="1.5" fill="white" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="white" stroke="none"/><circle cx="12" cy="18" r="1.5" fill="white" stroke="none"/></svg></span>
+          AgentFlow
+        </h1>
+        <p class="logo-subtitle">AI 工作流编排平台</p>
       </div>
       <nav class="nav-menu">
-        <div class="nav-item active" data-page="workflows" onclick="navigateTo('workflows')">
-          <span class="nav-icon"></span>
-          <span>[WORKFLOWS]</span>
+        <div class="nav-item active" data-page="dashboard" onclick="navigateTo('dashboard')">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1"/><rect x="14" y="3" width="7" height="5" rx="1"/><rect x="14" y="12" width="7" height="9" rx="1"/><rect x="3" y="16" width="7" height="5" rx="1"/></svg></span>
+          <span>仪表盘</span>
+        </div>
+        <div class="nav-item" data-page="workflows" onclick="navigateTo('workflows')">
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></span>
+          <span>工作流</span>
         </div>
         <div class="nav-item" data-page="editor" onclick="navigateTo('editor')">
-          <span class="nav-icon"></span>
-          <span>[EDITOR]</span>
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></span>
+          <span>编辑器</span>
         </div>
         <div class="nav-item" data-page="templates" onclick="navigateTo('templates')">
-          <span class="nav-icon"></span>
-          <span>[TEMPLATES]</span>
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg></span>
+          <span>模板中心</span>
         </div>
         <div class="nav-item" data-page="executions" onclick="navigateTo('executions')">
-          <span class="nav-icon"></span>
-          <span>[EXECUTIONS]</span>
+          <span class="nav-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span>
+          <span>执行记录</span>
         </div>
       </nav>
       <div class="sidebar-footer">
         <div class="stats">
           <div class="stat-item">
             <div class="stat-value" id="stat-workflows">0</div>
-            <div class="stat-label">WORKFLOWS</div>
+            <div class="stat-label">工作流</div>
           </div>
           <div class="stat-item">
             <div class="stat-value" id="stat-executions">0</div>
-            <div class="stat-label">EXEC_COUNT</div>
+            <div class="stat-label">执行次数</div>
           </div>
         </div>
       </div>
     </aside>
 
-    <!-- Main Content -->
     <main class="main-content">
       <div class="topbar">
-        <h2 class="page-title" id="page-title">// WORKFLOWS</h2>
+        <h2 class="page-title" id="page-title">仪表盘</h2>
         <div class="topbar-actions">
+          <button class="btn" id="btn-install" onclick="installApp()" style="display:none;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+            安装应用
+          </button>
           <button class="btn btn-primary" id="btn-new-workflow" onclick="showCreateModal()">
-            + NEW_WORKFLOW
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            新建工作流
           </button>
         </div>
       </div>
 
-      <div class="content-area" id="content-area">
-        <!-- Dynamic content loaded here -->
-      </div>
+      <div class="content-area" id="content-area"></div>
     </main>
   </div>
 
-  <!-- Create Workflow Modal -->
   <div class="modal" id="create-modal">
     <div class="modal-content">
       <div class="modal-header">
-        <h2 class="modal-title">// NEW_WORKFLOW</h2>
-        <button class="modal-close" onclick="closeModal('create-modal')">×</button>
+        <h2 class="modal-title">新建工作流</h2>
+        <button class="modal-close" onclick="closeModal('create-modal')">&times;</button>
       </div>
       <div class="modal-body">
         <div class="form-group">
-          <label class="form-label">NAME</label>
-          <input type="text" class="property-input" id="new-workflow-name" placeholder="Enter workflow name...">
+          <label class="form-label">名称</label>
+          <input type="text" class="property-input" id="new-workflow-name" placeholder="输入工作流名称">
         </div>
         <div class="form-group">
-          <label class="form-label">DESCRIPTION</label>
-          <textarea class="property-textarea" id="new-workflow-desc" placeholder="Describe workflow function..."></textarea>
+          <label class="form-label">描述</label>
+          <textarea class="property-textarea" id="new-workflow-desc" placeholder="描述工作流的用途"></textarea>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn" onclick="closeModal('create-modal')">CANCEL</button>
-        <button class="btn btn-primary" onclick="createWorkflow()">EXECUTE</button>
+        <button class="btn" onclick="closeModal('create-modal')">取消</button>
+        <button class="btn btn-primary" onclick="createWorkflow()">创建</button>
       </div>
     </div>
   </div>
 
-  <!-- Decompose Modal -->
   <div class="modal" id="decompose-modal">
     <div class="modal-content" style="max-width: 560px;">
       <div class="modal-header">
-        <h2 class="modal-title">// AI_TASK_DECOMPOSE</h2>
-        <button class="modal-close" onclick="closeModal('decompose-modal')">×</button>
+        <h2 class="modal-title">AI 任务分解</h2>
+        <button class="modal-close" onclick="closeModal('decompose-modal')">&times;</button>
       </div>
       <div class="modal-body">
-        <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 12px;">
-          > INPUT_COMPLEX_TASK // AI WILL AUTO-DECOMPOSE INTO EXECUTABLE SUBTASKS
+        <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 13px; line-height: 1.5;">
+          输入复杂任务，AI 将自动拆解为可执行的子任务步骤
         </p>
         <div class="form-group">
-          <label class="form-label">TASK_INPUT</label>
-          <textarea class="property-textarea" id="decompose-input" placeholder="e.g. Analyze article sentiment, translate to English, generate summary..."></textarea>
+          <label class="form-label">任务描述</label>
+          <textarea class="property-textarea" id="decompose-input" placeholder="例如：分析文章情感倾向，翻译成英文，生成摘要..."></textarea>
         </div>
         <button class="btn btn-primary" onclick="runDecompose()" id="btn-decompose" style="width: 100%;">
-          > INITIATE_DECOMPOSE
+          开始分解
         </button>
         <div id="decompose-result" style="margin-top: 16px;"></div>
       </div>
       <div class="modal-footer">
-        <button class="btn" onclick="closeModal('decompose-modal')">CLOSE</button>
+        <button class="btn" onclick="closeModal('decompose-modal')">关闭</button>
         <button class="btn btn-primary" onclick="applyDecompose()" id="btn-apply-decompose" style="display:none;">
-          APPLY_TO_EDITOR
+          应用到编辑器
         </button>
       </div>
     </div>
   </div>
 
-  <!-- Toast Container -->
   <div class="toast-container" id="toast-container"></div>
 
   <script src="/static/js/app.js"></script>
