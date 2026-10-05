@@ -1,15 +1,12 @@
-version: '3.8'
-
 services:
   agentflow:
     build: .
     ports:
       - "8001:8000"
+    env_file:
+      - ./backend/.env
     environment:
-      - BAILIAN_API_KEY=${BAILIAN_API_KEY}
-      - BAILIAN_BASE_URL=${BAILIAN_BASE_URL}
-      - BAILIAN_MODEL=${BAILIAN_MODEL:-qwen-plus}
-      - DATABASE_URL=sqlite:///./workflows.db
+      - DATABASE_URL=sqlite:///./data/workflows.db
     volumes:
       - ./data:/app/backend/data
     restart: unless-stopped

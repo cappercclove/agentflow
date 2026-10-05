@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, JSON, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
@@ -18,8 +18,8 @@ class Workflow(Base):
     description = Column(Text, default="")
     nodes = Column(JSON, nullable=False, default=list)
     edges = Column(JSON, nullable=False, default=list)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     executions = relationship("Execution", back_populates="workflow", cascade="all, delete-orphan")
 
@@ -35,7 +35,7 @@ class Execution(Base):
     logs = Column(JSON, default=list)
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     workflow = relationship("Workflow", back_populates="executions")
 

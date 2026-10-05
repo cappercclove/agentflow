@@ -13,15 +13,16 @@ def get_client(model: str = None):
     return _client_cache[model]
 
 
-MODEL_MAP = {
-    "qwen-plus": os.getenv("BAILIAN_MODEL", "qwen-plus"),
-    "qwen-turbo": "qwen-turbo",
-    "qwen-max": "qwen-max",
-}
+def _get_model_map():
+    return {
+        "qwen-plus": os.getenv("BAILIAN_MODEL", "qwen-plus"),
+        "qwen-turbo": "qwen-turbo",
+        "qwen-max": "qwen-max",
+    }
 
 
 def call_llm(prompt: str, model: str = "qwen-plus", temperature: float = 0.7) -> str:
-    model_name = MODEL_MAP.get(model, model)
+    model_name = _get_model_map().get(model, model)
     client = get_client(model)
     response = client.chat.completions.create(
         model=model_name,

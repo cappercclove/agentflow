@@ -1,8 +1,68 @@
 import json
 import asyncio
+import re
+import operator
+import logging
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 from llm_client import call_llm
+
+logger = logging.getLogger(__name__)
+
+
+SAFE_OPS = {
+    "==": operator.eq, "!=": operator.ne,
+    ">": operator.gt, ">=": operator.ge,
+    "<": operator.lt, "<=": operator.le,
+    "and": lambda a, b: bool(a) and bool(b),
+    "or": lambda a, b: bool(a) or bool(b),
+}
+
+TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?|\"[^\"]*\"|'[^']*'|==|!=|>=|<=|>|<|and|or|[a-zA-Z_]\w*)")
+
+
+def _safe_eval_condition(expr: str, context: dict):
+    tokens = [t for t in TOKEN_RE.findall(expr) if t.strip()]
+    if not tokens:
+        return False
+
+    def resolve(token):
+        if token in ("and", "or"):
+            return token
+        if token in SAFE_OPS:
+            return token
+        if token.startswith(("\"", "'")):
+            return token[1:-1]
+        try:
+            return float(token) if "." in token else int(token)
+        except ValueError:
+            return context.get(token, "")
+
+    def parse_or(pos):
+        left, pos = parse_and(pos)
+        while pos < len(tokens) and tokens[pos] == "or":
+            right, pos = parse_and(pos + 1)
+            left = SAFE_OPS["or"](left, right)
+        return left, pos
+
+    def parse_and(pos):
+        left, pos = parse_comparison(pos)
+        while pos < len(tokens) and tokens[pos] == "and":
+            right, pos = parse_comparison(pos + 1)
+            left = SAFE_OPS["and"](left, right)
+        return left, pos
+
+    def parse_comparison(pos):
+        left = resolve(tokens[pos])
+        pos += 1
+        if pos < len(tokens) and tokens[pos] in SAFE_OPS:
+            op = SAFE_OPS[tokens[pos]]
+            right = resolve(tokens[pos + 1])
+            return op(left, right), pos + 2
+        return bool(left), pos
+
+    result, _ = parse_or(0)
+    return bool(result)
 
 
 async def execute_node(node: dict, context: dict, send_log=None) -> dict:
@@ -47,8 +107,9 @@ async def _exec_llm(node: dict, context: dict) -> dict:
 
     prompt = _replace_vars(prompt, context)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     result = await loop.run_in_executor(None, call_llm, prompt, model, temperature)
+    logger.info("LLM node executed: node_id=%s model=%s", node.get("id"), model)
     return {"output": result}
 
 
@@ -57,7 +118,7 @@ async def _exec_condition(node: dict, context: dict) -> dict:
     condition = _replace_vars(condition, context)
 
     try:
-        result = eval(condition, {"__builtins__": {}}, context)
+        result = _safe_eval_condition(condition, context)
         branch = "true" if result else "false"
         return {"output": branch, "branch": branch}
     except Exception:
