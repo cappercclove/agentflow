@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from models import engine, SessionLocal, Workflow, Execution
-from workflow_engine import execute_node
+from workflow_engine import execute_node, validate_workflow
 from llm_client import decompose_task, call_llm
 from node_types import NODE_TYPES
 
@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 active_connections: dict[int, WebSocket] = {}
+pending_tasks: set = set()
 shutdown_event = asyncio.Event()
 
 
@@ -36,6 +37,8 @@ async def lifespan(app: FastAPI):
     logger.info("Server started")
     yield
     shutdown_event.set()
+    for task in list(pending_tasks):
+        task.cancel()
     for ws in list(active_connections.values()):
         try:
             await ws.close()
@@ -108,6 +111,11 @@ class DecomposeRequest(BaseModel):
 class NodeExecuteRequest(BaseModel):
     node: dict
     context: dict = {}
+
+
+class ValidateRequest(BaseModel):
+    nodes: list = []
+    edges: list = []
 
 
 def get_db():
@@ -212,6 +220,11 @@ async def execute_workflow(workflow_id: int, data: ExecuteRequest, db: Session =
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
 
+    problems = validate_workflow(workflow.nodes or [], workflow.edges or [])
+    if problems:
+        logger.warning("Workflow rejected before execution: workflow_id=%s problems=%s", workflow_id, problems)
+        raise HTTPException(status_code=400, detail="；".join(problems))
+
     execution = Execution(
         workflow_id=workflow_id,
         status="running",
@@ -227,7 +240,9 @@ async def execute_workflow(workflow_id: int, data: ExecuteRequest, db: Session =
     edges_snapshot = workflow.edges
 
     logger.info("Workflow execution started: workflow_id=%s execution_id=%s", workflow_id, exec_id)
-    asyncio.create_task(_run_workflow(exec_id, workflow_id, nodes_snapshot, edges_snapshot, data.input))
+    task = asyncio.create_task(_run_workflow(exec_id, workflow_id, nodes_snapshot, edges_snapshot, data.input))
+    pending_tasks.add(task)
+    task.add_done_callback(pending_tasks.discard)
 
     return {"execution_id": exec_id, "status": "running"}
 
@@ -278,6 +293,12 @@ async def decompose(data: DecomposeRequest):
 async def execute_single_node(data: NodeExecuteRequest):
     result = await execute_node(data.node, data.context)
     return result
+
+
+@app.post("/api/workflows/validate")
+async def validate_workflow_graph(data: ValidateRequest):
+    problems = validate_workflow(data.nodes, data.edges)
+    return {"valid": not problems, "problems": problems}
 
 
 @app.get("/api/stats")
@@ -348,6 +369,32 @@ async def websocket_execute(websocket: WebSocket, execution_id: int):
         active_connections.pop(execution_id, None)
 
 
+def _outgoing_edges(edges: list, branch: str | None) -> list:
+    """Pick the edges that should actually run.
+
+    A condition node routes by port: edges tagged sourcePort == branch win.
+    Untagged edges (drawn before ports existed) keep the legacy behaviour of
+    taking the first one, so a saved workflow never runs both branches.
+    """
+    if branch is None:
+        return edges
+    tagged = [e for e in edges if e.get("sourcePort") == branch]
+    if tagged:
+        return tagged
+    return [e for e in edges if not e.get("sourcePort")][:1]
+
+
+def _skipped_edges(edges: list, branch: str | None) -> list:
+    taken = {id(e) for e in _outgoing_edges(edges, branch)}
+    return [e for e in edges if id(e) not in taken]
+
+
+def _truncate(value, limit: int = 4000):
+    if isinstance(value, str) and len(value) > limit:
+        return value[:limit] + f"…（已截断，共 {len(value)} 字）"
+    return value
+
+
 async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list, input_data: dict):
     db = SessionLocal()
     try:
@@ -388,6 +435,7 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
         current_nodes = start_nodes
         visited = set()
         final_output = ""
+        node_outputs = {}
 
         while current_nodes:
             next_nodes = []
@@ -401,7 +449,7 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
 
                 if result["status"] == "error":
                     execution.status = "error"
-                    execution.output_data = {"error": result["output"]}
+                    execution.output_data = {"error": result["output"], "nodes": node_outputs}
                     execution.finished_at = datetime.now(timezone.utc)
                     db.commit()
                     ws = active_connections.get(exec_id)
@@ -413,17 +461,26 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
                     return
 
                 context[node_id] = result["output"]
-                final_output = result["output"]
+                node_outputs[node_id] = _truncate(result["output"])
+                if node.get("type") != "end":
+                    final_output = result["output"]
+                    context["final_output"] = final_output
 
-                for edge in edge_map.get(node_id, []):
+                outgoing = edge_map.get(node_id, [])
+                for edge in _outgoing_edges(outgoing, result.get("branch")):
                     target_id = edge.get("target")
                     if target_id and target_id in node_map and target_id not in visited:
                         next_nodes.append(node_map[target_id])
 
+                for edge in _skipped_edges(outgoing, result.get("branch")):
+                    skipped = node_map.get(edge.get("target"))
+                    if skipped:
+                        await send_log(node_id, "skipped", f"跳过分支: {skipped.get('title') or skipped['id']}")
+
             current_nodes = next_nodes
 
         execution.status = "completed"
-        execution.output_data = {"output": final_output}
+        execution.output_data = {"output": _truncate(final_output), "nodes": node_outputs}
         execution.finished_at = datetime.now(timezone.utc)
         db.commit()
 

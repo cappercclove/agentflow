@@ -28,9 +28,9 @@ NODE_TYPES = {
         "inputs": ["input"],
         "outputs": ["true", "false"],
         "config": {
-            "condition": "len('{{input}}') > 10",
+            "condition": "input",
         },
-        "description": "根据条件走不同分支",
+        "description": "按条件表达式走 true / false 分支，支持 == != > >= < <= contains and or",
     },
     "http": {
         "label": "HTTP 请求",
@@ -43,8 +43,9 @@ NODE_TYPES = {
             "method": "GET",
             "headers": {},
             "body": "",
+            "fail_on_error": True,
         },
-        "description": "发送 HTTP 请求获取数据",
+        "description": "发送 GET/POST/PUT/PATCH/DELETE 请求获取数据",
     },
     "text": {
         "label": "文本处理",
@@ -60,6 +61,24 @@ NODE_TYPES = {
             "new": "",
         },
         "description": "拼接、分割、替换文本",
+    },
+    "loop": {
+        "label": "批量循环",
+        "icon": "🔁",
+        "color": "#06b6d4",
+        "inputs": ["input"],
+        "outputs": ["output"],
+        "config": {
+            "source": "{{input}}",
+            "separator": "\\n",
+            "action": "llm",
+            "prompt": "请针对以下条目生成一句摘要：\n{{item}}",
+            "model": "qwen-plus",
+            "temperature": 0.5,
+            "max_items": 20,
+            "join": "\\n\\n",
+        },
+        "description": "把上游列表逐项处理（调用大模型或原样收集），并发执行后聚合结果",
     },
     "end": {
         "label": "结束",

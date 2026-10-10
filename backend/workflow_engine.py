@@ -1,6 +1,7 @@
 import json
 import asyncio
 import re
+import time
 import operator
 import logging
 import httpx
@@ -16,9 +17,12 @@ SAFE_OPS = {
     "<": operator.lt, "<=": operator.le,
     "and": lambda a, b: bool(a) and bool(b),
     "or": lambda a, b: bool(a) or bool(b),
+    "contains": lambda a, b: str(b) in str(a),
 }
 
-TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?|\"[^\"]*\"|'[^']*'|==|!=|>=|<=|>|<|and|or|[a-zA-Z_]\w*)")
+LOGIC_TOKENS = ("and", "or", "contains")
+
+TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?|\"[^\"]*\"|'[^']*'|==|!=|>=|<=|>|<|and|or|contains|[a-zA-Z_]\w*)")
 
 
 def _safe_eval_condition(expr: str, context: dict):
@@ -27,7 +31,7 @@ def _safe_eval_condition(expr: str, context: dict):
         return False
 
     def resolve(token):
-        if token in ("and", "or"):
+        if token in LOGIC_TOKENS:
             return token
         if token in SAFE_OPS:
             return token
@@ -73,6 +77,7 @@ async def execute_node(node: dict, context: dict, send_log=None) -> dict:
     if send_log:
         await send_log(node_id, "running", f"开始执行: {node_title}")
 
+    started = time.perf_counter()
     try:
         if node_type == "llm":
             result = await _exec_llm(node, context)
@@ -82,6 +87,8 @@ async def execute_node(node: dict, context: dict, send_log=None) -> dict:
             result = await _exec_http(node, context)
         elif node_type == "text":
             result = await _exec_text(node, context)
+        elif node_type == "loop":
+            result = await _exec_loop(node, context)
         elif node_type == "start":
             result = {"output": context.get("input", "")}
         elif node_type == "end":
@@ -89,10 +96,16 @@ async def execute_node(node: dict, context: dict, send_log=None) -> dict:
         else:
             result = {"output": f"未知节点类型: {node_type}"}
 
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        note = result.get("note") or ""
         if send_log:
-            await send_log(node_id, "completed", f"完成: {node_title}")
+            suffix = f"（{duration_ms}ms）" + (f" · {note}" if note else "")
+            await send_log(node_id, "completed", f"完成: {node_title}{suffix}")
 
-        return {"status": "success", "output": result.get("output", "")}
+        out = {"status": "success", "output": result.get("output", ""), "duration_ms": duration_ms}
+        if result.get("branch"):
+            out["branch"] = result["branch"]
+        return out
 
     except Exception as e:
         if send_log:
@@ -119,28 +132,79 @@ async def _exec_condition(node: dict, context: dict) -> dict:
 
     try:
         result = _safe_eval_condition(condition, context)
-        branch = "true" if result else "false"
-        return {"output": branch, "branch": branch}
-    except Exception:
-        return {"output": "false", "branch": "false"}
+    except Exception as e:
+        logger.warning("Condition node failed to evaluate: node_id=%s expr=%r error=%s", node.get("id"), condition, e)
+        return {"output": "false", "branch": "false", "note": "表达式解析失败，走 false 分支"}
+
+    branch = "true" if result else "false"
+    return {"output": branch, "branch": branch, "note": f"分支 → {branch}"}
 
 
 async def _exec_http(node: dict, context: dict) -> dict:
-    url = node.get("config", {}).get("url", "")
-    method = node.get("config", {}).get("method", "GET")
-    headers = node.get("config", {}).get("headers", {})
-    body = node.get("config", {}).get("body", "")
+    cfg = node.get("config", {})
+    url = _replace_vars(cfg.get("url", ""), context)
+    method = str(cfg.get("method", "GET")).upper()
+    headers = _as_headers(cfg.get("headers", {}))
+    body = _replace_vars(cfg.get("body", ""), context)
 
-    url = _replace_vars(url, context)
-    body = _replace_vars(body, context)
+    if not url:
+        raise ValueError("HTTP 节点未配置请求地址")
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        if method.upper() == "GET":
-            resp = await client.get(url, headers=headers)
-        else:
-            resp = await client.post(url, headers=headers, content=body)
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        resp = await client.request(
+            method,
+            url,
+            headers=headers,
+            content=body.encode("utf-8") if body else None,
+        )
 
-    return {"output": resp.text, "status_code": resp.status_code}
+    if resp.is_error and cfg.get("fail_on_error", True):
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+    return {"output": resp.text, "status_code": resp.status_code, "note": f"{method} {resp.status_code}"}
+
+
+async def _exec_loop(node: dict, context: dict) -> dict:
+    cfg = node.get("config", {})
+    items = _as_list(_replace_vars(cfg.get("source", "{{input}}"), context), _unescape(cfg.get("separator", "\n")))
+
+    try:
+        max_items = max(1, min(int(cfg.get("max_items", 20) or 20), 100))
+    except (TypeError, ValueError):
+        max_items = 20
+    items = items[:max_items]
+
+    if not items:
+        return {"output": "", "note": "0 项"}
+
+    join = _unescape(cfg.get("join", "\n\n"))
+
+    if cfg.get("action", "llm") != "llm":
+        return {"output": join.join(items), "note": f"{len(items)} 项"}
+
+    template = cfg.get("prompt", "{{item}}")
+    model = cfg.get("model", "qwen-plus")
+    temperature = float(cfg.get("temperature", 0.5))
+    semaphore = asyncio.Semaphore(3)
+    loop = asyncio.get_running_loop()
+
+    async def run_one(index: int, item: str) -> str:
+        item_context = dict(context)
+        item_context["item"] = item
+        item_context["index"] = index + 1
+        prompt = _replace_vars(template, item_context)
+        async with semaphore:
+            try:
+                return await loop.run_in_executor(None, call_llm, prompt, model, temperature)
+            except Exception as e:
+                logger.warning("Loop item failed: node_id=%s index=%s error=%s", node.get("id"), index, e)
+                return f"[第 {index + 1} 项执行失败: {e}]"
+
+    results = await asyncio.gather(*(run_one(i, it) for i, it in enumerate(items)))
+    failures = [r for r in results if r.startswith("[第")]
+    if len(failures) == len(items):
+        raise RuntimeError(f"循环 {len(items)} 项全部失败：{failures[0]}")
+    return {"output": join.join(results), "note": f"{len(items)} 项" + (f"，{len(failures)} 项失败" if failures else "")}
 
 
 async def _exec_text(node: dict, context: dict) -> dict:
@@ -152,7 +216,7 @@ async def _exec_text(node: dict, context: dict) -> dict:
     if operation == "concat":
         return {"output": "".join(processed)}
     elif operation == "split":
-        separator = node.get("config", {}).get("separator", "\n")
+        separator = _unescape(node.get("config", {}).get("separator", "\n"))
         return {"output": processed[0].split(separator) if processed else []}
     elif operation == "replace":
         text = processed[0] if processed else ""
@@ -161,6 +225,48 @@ async def _exec_text(node: dict, context: dict) -> dict:
         return {"output": text.replace(old, new)}
     else:
         return {"output": processed[0] if processed else ""}
+
+
+def _unescape(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    return text.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "")
+
+
+def _as_list(value, separator: str) -> list:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith(("[", "{")):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(i).strip() for i in parsed if str(i).strip()]
+            if isinstance(parsed, dict):
+                return [f"{k}: {v}" for k, v in parsed.items()]
+        return [i.strip() for i in stripped.split(separator) if i.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(i).strip() for i in value if str(i).strip()]
+    if isinstance(value, dict):
+        return [f"{k}: {v}" for k, v in value.items()]
+    if value is None:
+        return []
+    return [str(value)]
+
+
+def _as_headers(headers) -> dict:
+    if isinstance(headers, dict):
+        return {str(k): str(v) for k, v in headers.items()}
+    if isinstance(headers, str) and headers.strip():
+        try:
+            parsed = json.loads(headers)
+        except json.JSONDecodeError:
+            raise ValueError("请求头需为 JSON 对象，例如 {\"Authorization\": \"Bearer xxx\"}")
+        if not isinstance(parsed, dict):
+            raise ValueError("请求头需为 JSON 对象")
+        return {str(k): str(v) for k, v in parsed.items()}
+    return {}
 
 
 def _replace_vars(text: str, context: dict) -> str:
@@ -174,3 +280,69 @@ def _replace_vars(text: str, context: dict) -> str:
             value = str(value)
         text = text.replace(placeholder, value)
     return text
+
+
+REQUIRED_CONFIG = {
+    "llm": ("prompt", "提示词"),
+    "condition": ("condition", "条件表达式"),
+    "http": ("url", "请求地址"),
+}
+
+
+def validate_workflow(nodes: list, edges: list) -> list[str]:
+    """Return a list of human-readable problems that would break execution."""
+    from node_types import NODE_TYPES
+
+    if not nodes:
+        return ["工作流为空，请先从左侧拖入节点"]
+
+    problems = []
+    ids = [n.get("id") for n in nodes]
+    id_set = {i for i in ids if i}
+
+    duplicated = sorted({i for i in id_set if ids.count(i) > 1})
+    if duplicated:
+        problems.append(f"节点 ID 重复: {', '.join(duplicated)}")
+
+    starts = [n for n in nodes if n.get("type") == "start"]
+    if not starts:
+        problems.append("缺少「开始」节点")
+    elif len(starts) > 1:
+        problems.append(f"有 {len(starts)} 个「开始」节点，只应保留 1 个")
+
+    if not any(n.get("type") == "end" for n in nodes):
+        problems.append("缺少「结束」节点")
+
+    for node in nodes:
+        node_id = node.get("id") or "?"
+        node_type = node.get("type")
+        label = node.get("title") or node_type
+        if node_type not in NODE_TYPES:
+            problems.append(f"节点「{label}」类型未知: {node_type}")
+            continue
+        key, field = REQUIRED_CONFIG.get(node_type, (None, None))
+        if key and not str(node.get("config", {}).get(key, "")).strip():
+            problems.append(f"节点「{label}」未填写{field}")
+
+    for edge in edges:
+        for endpoint in ("source", "target"):
+            if edge.get(endpoint) not in id_set:
+                problems.append(f"连线引用了不存在的节点: {edge.get(endpoint)}")
+
+    reachable = set()
+    out_map = {}
+    for edge in edges:
+        out_map.setdefault(edge.get("source"), []).append(edge.get("target"))
+    queue = [n.get("id") for n in starts]
+    while queue:
+        current = queue.pop()
+        if current in reachable:
+            continue
+        reachable.add(current)
+        queue.extend(out_map.get(current, []))
+
+    orphans = [n.get("title") or n.get("id") for n in nodes if n.get("id") not in reachable]
+    if orphans:
+        problems.append(f"以下节点没有从「开始」连通的线路: {', '.join(orphans)}")
+
+    return problems
