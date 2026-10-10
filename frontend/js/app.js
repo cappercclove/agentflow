@@ -87,11 +87,12 @@ async function renderDashboard(container) {
   if (recentExec.length > 0) {
     recentExec.forEach(exec => {
       const label = statusLabels[exec.status] || exec.status;
+      const duration = exec.finished_at ? ` · 耗时 ${formatDuration(exec.started_at, exec.finished_at)}` : '';
       execRows += `
         <div class="dash-row" onclick="viewExecution(${exec.id})">
           <div style="min-width:0;">
             <div class="dash-row-title">执行 #${exec.id}</div>
-            <div class="dash-row-sub">工作流 ${exec.workflow_id} · ${formatDate(exec.started_at)}</div>
+            <div class="dash-row-sub">${escapeHtml(exec.workflow_name || `工作流 #${exec.workflow_id}`)} · ${formatDate(exec.started_at)}${duration}</div>
           </div>
           <span class="exec-status ${exec.status}"><span class="exec-status-dot"></span>${label}</span>
         </div>`;
@@ -264,6 +265,11 @@ async function renderExecutions(container) {
   const res = await fetch(`${API}/api/executions`);
   const executions = await res.json();
 
+  if (!workflows.length) {
+    const wfRes = await fetch(`${API}/api/workflows`);
+    if (wfRes.ok) workflows = await wfRes.json();
+  }
+
   if (executions.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
@@ -285,12 +291,14 @@ async function renderExecutions(container) {
   let html = '<div style="display: flex; flex-direction: column; gap: 10px;">';
   executions.forEach((exec, i) => {
     const label = statusLabels[exec.status] || exec.status;
+    const wf = workflows.find(w => w.id === exec.workflow_id);
+    const duration = exec.finished_at ? ` · 耗时 ${formatDuration(exec.started_at, exec.finished_at)}` : '';
     html += `
       <div class="exec-card" style="animation-delay: ${i * 0.04}s">
         <div style="display: flex; align-items: center; gap: 14px;">
           <div>
             <div style="font-size: 14px; color: var(--text-primary); font-weight: 600;">执行 #${exec.id}</div>
-            <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">工作流 ${exec.workflow_id} · ${formatDate(exec.started_at)}</div>
+            <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">${escapeHtml(wf ? wf.name : `工作流 #${exec.workflow_id}`)} · ${formatDate(exec.started_at)}${duration}</div>
           </div>
         </div>
         <div style="display: flex; align-items: center; gap: 12px;">
@@ -402,15 +410,17 @@ async function viewExecution(id) {
   const exec = await res.json();
 
   const nodeTitles = {};
+  let wfName = '';
   try {
     const wfRes = await fetch(`${API}/api/workflows/${exec.workflow_id}`);
     if (wfRes.ok) {
       const wf = await wfRes.json();
+      wfName = wf.name || '';
       (wf.nodes || []).forEach(n => { nodeTitles[n.id] = n.title || n.type; });
     }
   } catch (e) {}
 
-  showExecutionDetail(exec, nodeTitles);
+  showExecutionDetail(exec, nodeTitles, wfName);
 }
 
 let liveSocket = null;
@@ -492,7 +502,7 @@ function appendLogLine(log) {
   box.scrollTop = box.scrollHeight;
 }
 
-function showExecutionDetail(exec, nodeTitles = {}) {
+function showExecutionDetail(exec, nodeTitles = {}, wfName = '') {
   const container = document.getElementById('content-area');
   const logs = exec.logs || [];
   const output = exec.output_data || {};
@@ -543,8 +553,9 @@ function showExecutionDetail(exec, nodeTitles = {}) {
           <span class="exec-status-dot"></span>
           ${statusLabels[exec.status] || exec.status}
         </span>
-        <span>工作流 ${exec.workflow_id}</span>
+        <span>${wfName ? escapeHtml(wfName) : `工作流 #${exec.workflow_id}`}</span>
         <span>${formatDate(exec.started_at)}</span>
+        ${exec.finished_at ? `<span>耗时 ${formatDuration(exec.started_at, exec.finished_at)}</span>` : ''}
         ${isFinished(exec.status) ? '' : '<span class="live-dot"></span><span style="color: var(--text-tertiary); font-size: 12px;">实时日志</span>'}
       </div>
     </div>
@@ -751,16 +762,32 @@ function escapeAttr(value) {
     .replace(/"/g, '&quot;');
 }
 
+// SQLite hands back the UTC datetime without an offset, so an aware parse here
+// would shift every timestamp by the viewer's own timezone.
+function parseTs(dateStr) {
+  if (!dateStr) return null;
+  const hasZone = /Z$|[+-]\d{2}:?\d{2}$/.test(dateStr);
+  return new Date(hasZone ? dateStr : dateStr + 'Z');
+}
+
 function formatDate(dateStr) {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr);
+  const d = parseTs(dateStr);
+  if (!d) return '-';
   return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 }
 
 function formatTime(dateStr) {
-  if (!dateStr) return '-';
-  const d = new Date(dateStr);
+  const d = parseTs(dateStr);
+  if (!d) return '-';
   return d.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function formatDuration(start, end) {
+  const a = parseTs(start);
+  const b = parseTs(end);
+  if (!a || !b) return '';
+  const ms = b - a;
+  return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
 let deferredPrompt = null;
@@ -809,7 +836,14 @@ function registerSW() {
     });
   });
 
+  // clients.claim() fires controllerchange on the very first visit, when the
+  // page was served from the network and has nothing stale to flush.
+  let hadController = !!navigator.serviceWorker.controller;
   navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (!hadController) {
+      hadController = true;
+      return;
+    }
     window.location.reload();
   });
 }

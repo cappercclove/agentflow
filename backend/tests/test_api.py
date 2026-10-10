@@ -133,6 +133,11 @@ async def test_execution_routes_only_the_taken_branch(client):
     assert set(execution["output_data"]["nodes"]) == {"start", "cond", "t", "end"}
     assert any("跳过分支" in log["message"] for log in execution["logs"])
 
+    stats = (await client.get("/api/stats")).json()
+    recent = stats["recent_executions"][0]
+    assert recent["workflow_name"] == "Branching"
+    assert recent["finished_at"]
+
 
 async def test_loop_node_aggregates_items(client):
     nodes = [

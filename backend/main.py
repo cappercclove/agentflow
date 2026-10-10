@@ -326,6 +326,13 @@ async def get_stats(db: Session = Depends(get_db)):
         .all()
     )
 
+    wf_names = {
+        w.id: w.name
+        for w in db.query(Workflow)
+        .filter(Workflow.id.in_({e.workflow_id for e in recent_executions}))
+        .all()
+    }
+
     return {
         "workflows": workflow_count,
         "executions": execution_count,
@@ -347,8 +354,10 @@ async def get_stats(db: Session = Depends(get_db)):
             {
                 "id": e.id,
                 "workflow_id": e.workflow_id,
+                "workflow_name": wf_names.get(e.workflow_id),
                 "status": e.status,
                 "started_at": e.started_at.isoformat() if e.started_at else None,
+                "finished_at": e.finished_at.isoformat() if e.finished_at else None,
             }
             for e in recent_executions
         ],
