@@ -23,8 +23,9 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 - 可视化工作流编辑器（拖拽 + 连线）
 - AI 任务智能分解（复杂任务自动拆分为子任务）
 - 多模型调度（qwen-turbo / qwen-plus / qwen-max）
-- 条件分支 & 循环控制
-- WebSocket 实时执行日志
+- 条件分支真路由（「是 / 否」双出口，未选中的分支自动跳过）
+- 批量循环节点（列表逐项调用大模型，并发执行后聚合）
+- WebSocket 实时执行日志（含每个节点耗时与分支结果）
 - 预设工作流模板
 
 ### 🏗️ 系统架构
@@ -55,14 +56,29 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 
 ### ✨ 功能特性
 
-- **🎨 可视化编辑器** — 拖拽节点、SVG 连线、实时预览
+- **🎨 可视化编辑器** — 拖拽节点、SVG 连线、实时预览、Ctrl+Z 撤销
 - **🤖 AI 任务分解** — 输入复杂任务，自动拆分为可执行子任务
-- **🔀 条件分支** — if/else 判断，不同路径执行不同逻辑
-- **🌐 HTTP 请求** — 节点内直接调用外部 API
-- **📝 文本处理** — 拼接、分割、替换等文本操作
+- **🔀 条件分支** — 表达式求值（`==` `!=` `>` `>=` `<` `<=` `contains` `and` `or`），结果从「是 / 否」两个端口分流，未选中的分支在执行日志中记为「跳过」
+- **🔁 批量循环** — 把上游列表（JSON 数组或按分隔符拆分的文本）逐项交给大模型，3 路并发、条数上限可调，结果聚合为一段
+- **🌐 HTTP 请求** — GET / POST / PUT / PATCH / DELETE，支持自定义请求头与请求体，可配置 4xx/5xx 是否判定为失败
+- **📝 文本处理** — 拼接、拆分为列表、查找替换
 - **⚡ 多模型调度** — 不同节点使用不同模型（turbo/plus/max）
-- **📊 实时日志** — WebSocket 推送执行进度和结果
-- **📋 工作流模板** — 预设常用模板，一键加载
+- **🧩 变量引用** — 节点配置中用 `{{input}}` 引用入口内容，用 `{{节点ID}}` 引用上游输出，循环节点内还可用 `{{item}}` / `{{index}}`
+- **✅ 执行前校验** — 缺少开始/结束节点、连线指向幽灵节点、必填配置为空、节点不可达时直接返回中文原因，不会跑出一个半成品结果
+- **📊 实时日志** — WebSocket 推送每个节点的起止、耗时与分支走向，断线自动降级为轮询
+- **📋 工作流模板** — 预设 8 个模板，含条件分流与批量循环示例
+
+### 🧱 节点类型
+
+| 节点 | 输入 | 输出 | 关键配置 |
+|------|------|------|----------|
+| ▶ 开始 | — | output | 工作流入口，接 `input` 变量 |
+| 🤖 AI 对话 | input | output | `prompt` `model` `temperature` |
+| 🔀 条件判断 | input | true / false | `condition` 表达式 |
+| 🔁 批量循环 | input | output | `source` `separator` `action` `prompt` `max_items` `join` |
+| 🌐 HTTP 请求 | input | output | `url` `method` `headers` `body` `fail_on_error` |
+| 📝 文本处理 | input | output | `operation` `texts` `separator` `old` `new` |
+| ⏹ 结束 | input | — | 输出最后一个业务节点的 result |
 
 ### 🛠️ 技术栈
 
@@ -140,7 +156,9 @@ docker-compose up -d
 | GET | `/api/workflows/{id}` | 获取工作流详情 |
 | PUT | `/api/workflows/{id}` | 更新工作流 |
 | DELETE | `/api/workflows/{id}` | 删除工作流 |
-| POST | `/api/workflows/{id}/execute` | 执行工作流 |
+| POST | `/api/workflows/{id}/execute` | 执行工作流（先做结构校验，不通过返回 400 与中文原因） |
+| POST | `/api/workflows/validate` | 只校验图结构，返回问题列表 |
+| POST | `/api/nodes/execute` | 单节点试跑（调试用） |
 | POST | `/api/decompose` | AI 任务分解 |
 | GET | `/api/executions` | 获取执行记录 |
 | GET | `/api/stats` | 获取统计信息 |
@@ -153,7 +171,7 @@ agentflow/
 ├── backend/
 │   ├── main.py                 # FastAPI 入口，REST + WebSocket 路由
 │   ├── models.py               # SQLAlchemy 数据模型
-│   ├── workflow_engine.py      # 执行引擎（含条件表达式解析）
+│   ├── workflow_engine.py      # 执行引擎（条件求值、循环并发、图校验）
 │   ├── llm_client.py           # 多模型 LLM 客户端
 │   ├── node_types.py           # 节点类型定义
 │   ├── tests/                  # pytest 用例
@@ -200,14 +218,16 @@ AgentFlow is a visual AI workflow orchestration platform. Users build automation
 
 ### ✨ Features
 
-- **🎨 Visual Editor** — Drag-and-drop nodes, SVG edges, live preview
+- **🎨 Visual Editor** — Drag-and-drop nodes, port-anchored SVG edges, undo/redo
 - **🤖 AI Task Decomposition** — Automatically split complex tasks into subtasks
-- **🔀 Conditional Branching** — if/else logic for different execution paths
-- **🌐 HTTP Requests** — Call external APIs directly from nodes
-- **📝 Text Processing** — Concatenate, split, replace text operations
-- **⚡ Multi-Model Scheduling** — Use different models per node (turbo/plus/max)
-- ** Real-time Logs** — WebSocket push for execution progress
-- **📋 Workflow Templates** — Pre-built templates, one-click load
+- **🔀 Real Branch Routing** — Expressions (`==` `!=` `>` `contains` `and` `or`) pick the 是/否 output port; the untaken branch is logged as skipped instead of executed
+- **🔁 Batch Loop** — Feed a list (JSON array or split text) item by item into the model, 3-way concurrent, capped and joined back into one result
+- **🌐 HTTP Requests** — GET / POST / PUT / PATCH / DELETE with headers and body, optional fail-on-4xx/5xx
+- **📝 Text Processing** — Concatenate, split into a list, replace
+- **🧩 Variable Binding** — `{{input}}` plus any upstream node id, and `{{item}}` / `{{index}}` inside a loop
+- **✅ Pre-run Validation** — Missing start/end, dangling edges, empty required config or unreachable nodes are rejected with readable messages
+- ** Real-time Logs** — WebSocket stream of per-node start/finish, duration and branch, with polling fallback
+- **📋 Workflow Templates** — 8 pre-built templates including branching and batch-loop examples
 
 ###  Quick Start
 
