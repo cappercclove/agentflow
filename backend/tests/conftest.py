@@ -1,19 +1,20 @@
+import os
+
+# models.py binds its engine at import time, so the test database has to be
+# selected before anything imports it — the background workflow task opens its
+# own SessionLocal and must land on this same file.
+os.environ["DATABASE_URL"] = "sqlite:///./test.db"
+
 import pytest
 import pytest_asyncio
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
 from httpx import AsyncClient, ASGITransport
 
-from models import Base
+from models import Base, engine, SessionLocal
 from main import app, get_db
-
-TEST_DB_URL = "sqlite:///./test.db"
-test_engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
-TestSession = sessionmaker(autocommit=False, autoflush=False, bind=test_engine)
 
 
 def override_get_db():
-    db = TestSession()
+    db = SessionLocal()
     try:
         yield db
     finally:
@@ -25,9 +26,9 @@ app.dependency_overrides[get_db] = override_get_db
 
 @pytest.fixture(autouse=True)
 def setup_db():
-    Base.metadata.create_all(bind=test_engine)
+    Base.metadata.create_all(bind=engine)
     yield
-    Base.metadata.drop_all(bind=test_engine)
+    Base.metadata.drop_all(bind=engine)
 
 
 @pytest_asyncio.fixture
