@@ -1,4 +1,4 @@
-const CACHE_NAME = 'agentflow-v2';
+const CACHE_NAME = 'agentflow-v3';
 const ASSETS = [
   '/',
   '/static/offline.html',

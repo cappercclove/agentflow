@@ -120,9 +120,16 @@ function createNodeElement(node) {
   el.style.setProperty('--node-color', info.color);
 
   const hasInput = info.inputs && info.inputs.length > 0;
-  const hasOutput = info.outputs && info.outputs.length > 0;
+  const outputs = (info.outputs && info.outputs.length) ? info.outputs : [];
 
   const configHint = node.config?.model ? node.config.model.replace('qwen-', 'Qwen ') : '';
+
+  const outPorts = outputs.map(port => `
+    <div class="port-slot">
+      ${port === 'output' ? '' : `<span class="port-label ${port}">${port === 'true' ? '是' : '否'}</span>`}
+      <div class="node-port" data-node="${node.id}" data-kind="output" data-port="${port}"></div>
+    </div>
+  `).join('');
 
   el.innerHTML = `
     <div class="node-header">
@@ -131,8 +138,8 @@ function createNodeElement(node) {
     </div>
     ${configHint ? `<div class="node-body">${configHint}</div>` : ''}
     <div class="node-ports">
-      ${hasInput ? '<div class="node-port" data-node="' + node.id + '" data-port="input"></div>' : '<div></div>'}
-      ${hasOutput ? '<div class="node-port" data-node="' + node.id + '" data-port="output"></div>' : '<div></div>'}
+      ${hasInput ? '<div class="port-group"><div class="port-slot"><div class="node-port" data-node="' + node.id + '" data-kind="input" data-port="input"></div></div></div>' : '<div></div>'}
+      ${outPorts ? `<div class="port-group">${outPorts}</div>` : '<div></div>'}
     </div>
   `;
 
@@ -150,28 +157,38 @@ function createNodeElement(node) {
     port.addEventListener('mousedown', (e) => {
       e.stopPropagation();
       const nodeId = port.dataset.node;
-      const portType = port.dataset.port;
+      const kind = port.dataset.kind;
+      const portName = port.dataset.port;
 
       if (!connectingPort) {
-        connectingPort = { nodeId, portType };
-        const nodeColor = el.style.getPropertyValue('--node-color');
-        port.style.background = nodeColor;
-      } else {
-        if (connectingPort.nodeId !== nodeId && connectingPort.portType !== portType) {
-          const source = connectingPort.portType === 'output' ? connectingPort.nodeId : nodeId;
-          const target = connectingPort.portType === 'input' ? connectingPort.nodeId : nodeId;
-
-          const exists = editorEdges.some(e => e.source === source && e.target === target);
-          if (!exists) {
-            pushHistory();
-            editorEdges.push({ source, target });
-            renderCanvas();
-            saveWorkflow();
-          }
-        }
-        connectingPort = null;
-        el.querySelectorAll('.node-port').forEach(p => p.style.background = '');
+        connectingPort = { nodeId, kind, portName };
+        port.classList.add('connecting');
+        return;
       }
+
+      if (connectingPort.nodeId !== nodeId && connectingPort.kind !== kind) {
+        const out = connectingPort.kind === 'output' ? connectingPort : { nodeId, kind, portName };
+        const source = out.nodeId;
+        const target = connectingPort.kind === 'output' ? nodeId : connectingPort.nodeId;
+        const sourcePort = out.portName;
+
+        const exists = editorEdges.some(
+          edge => edge.source === source && edge.target === target && (edge.sourcePort || 'output') === sourcePort
+        );
+        if (!exists) {
+          pushHistory();
+          editorEdges.push({ source, target, sourcePort });
+          renderCanvas();
+          saveWorkflow();
+        }
+      } else if (connectingPort.nodeId === nodeId) {
+        showToast('不能连接节点自身', 'error');
+      } else {
+        showToast('请从输出端口连到另一个节点的输入端口', 'error');
+      }
+
+      connectingPort = null;
+      document.querySelectorAll('.node-port.connecting').forEach(p => p.classList.remove('connecting'));
     });
   });
 
@@ -180,6 +197,14 @@ function createNodeElement(node) {
   }
 
   return el;
+}
+
+function portAnchor(nodeEl, kind, portName) {
+  const sel = `.node-port[data-kind="${kind}"][data-port="${portName}"]`;
+  const portEl = nodeEl.querySelector(sel) || nodeEl.querySelector(`.node-port[data-kind="${kind}"]`);
+  if (!portEl) return null;
+  const r = portEl.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 }
 
 function renderEdges(svg) {
@@ -195,20 +220,23 @@ function renderEdges(svg) {
     if (!sourceEl || !targetEl) return;
 
     const canvasRect = svg.parentElement.getBoundingClientRect();
-    const sRect = sourceEl.getBoundingClientRect();
-    const tRect = targetEl.getBoundingClientRect();
+    const out = portAnchor(sourceEl, 'output', edge.sourcePort || 'output');
+    const inn = portAnchor(targetEl, 'input', 'input');
+    if (!out || !inn) return;
 
-    const x1 = sRect.right - canvasRect.left;
-    const y1 = sRect.top + sRect.height / 2 - canvasRect.top;
-    const x2 = tRect.left - canvasRect.left;
-    const y2 = tRect.top + tRect.height / 2 - canvasRect.top;
+    const x1 = out.x - canvasRect.left;
+    const y1 = out.y - canvasRect.top;
+    const x2 = inn.x - canvasRect.left;
+    const y2 = inn.y - canvasRect.top;
 
-    const midX = (x1 + x2) / 2;
-    const path = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
+    const dx = Math.max(40, Math.abs(x2 - x1) / 2);
+    const path = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+
+    const branchClass = edge.sourcePort === 'true' || edge.sourcePort === 'false' ? ` edge-${edge.sourcePort}` : '';
 
     const pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     pathEl.setAttribute('d', path);
-    pathEl.setAttribute('class', 'edge');
+    pathEl.setAttribute('class', `edge${branchClass}`);
     pathEl.dataset.index = i;
 
     pathEl.addEventListener('click', () => {
@@ -216,13 +244,14 @@ function renderEdges(svg) {
       editorEdges.splice(i, 1);
       renderCanvas();
       saveWorkflow();
+      showToast('已删除连线', 'success');
     });
 
     svg.appendChild(pathEl);
 
     const flowEl = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     flowEl.setAttribute('d', path);
-    flowEl.setAttribute('class', 'edge-flow');
+    flowEl.setAttribute('class', `edge-flow${branchClass}`);
     svg.appendChild(flowEl);
   });
 }
@@ -327,10 +356,13 @@ function selectNode(nodeId) {
 
   if (node.config) {
     if (node.config.prompt !== undefined) {
+      const promptLabel = node.config.source !== undefined
+        ? '每项提示词（{{item}} / {{index}}）'
+        : '提示词';
       html += `
         <div class="property-group">
-          <label class="property-label">提示词</label>
-          <textarea class="property-textarea" id="prop-prompt" oninput="updateNodeConfig('${nodeId}', 'prompt', this.value)">${escapeHtml(node.config.prompt)}</textarea>
+          <label class="property-label">${promptLabel}</label>
+          <textarea class="property-textarea" oninput="updateNodeConfig('${nodeId}', 'prompt', this.value)">${escapeHtml(node.config.prompt)}</textarea>
         </div>
       `;
     }
@@ -359,26 +391,96 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">请求地址</label>
-          <input type="text" class="property-input" value="${escapeHtml(node.config.url)}" oninput="updateNodeConfig('${nodeId}', 'url', this.value)">
+          <input type="text" class="property-input" value="${escapeAttr(node.config.url)}" oninput="updateNodeConfig('${nodeId}', 'url', this.value)">
         </div>
       `;
     }
     if (node.config.method !== undefined) {
+      const methods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
       html += `
         <div class="property-group">
           <label class="property-label">请求方法</label>
           <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'method', this.value)">
-            <option value="GET" ${node.config.method === 'GET' ? 'selected' : ''}>GET</option>
-            <option value="POST" ${node.config.method === 'POST' ? 'selected' : ''}>POST</option>
+            ${methods.map(m => `<option value="${m}" ${node.config.method === m ? 'selected' : ''}>${m}</option>`).join('')}
           </select>
         </div>
+        <div class="property-group">
+          <label class="property-label">请求头（JSON）</label>
+          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${nodeId}', 'headers', this.value)">${escapeHtml(JSON.stringify(node.config.headers ?? {}, null, 2))}</textarea>
+        </div>
+        ${node.config.method === 'GET' ? '' : `
+        <div class="property-group">
+          <label class="property-label">请求体</label>
+          <textarea class="property-textarea property-mono" placeholder='{"key": "{{input}}"}' oninput="updateNodeConfig('${nodeId}', 'body', this.value)">${escapeHtml(node.config.body ?? '')}</textarea>
+        </div>`}
+        <label class="property-check">
+          <input type="checkbox" ${node.config.fail_on_error !== false ? 'checked' : ''} onchange="updateNodeConfig('${nodeId}', 'fail_on_error', this.checked)">
+          <span>4xx / 5xx 视为执行失败</span>
+        </label>
       `;
     }
     if (node.config.condition !== undefined) {
       html += `
         <div class="property-group">
           <label class="property-label">条件表达式</label>
-          <input type="text" class="property-input" value="${escapeHtml(node.config.condition)}" oninput="updateNodeConfig('${nodeId}', 'condition', this.value)">
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.condition)}" oninput="updateNodeConfig('${nodeId}', 'condition', this.value)">
+          <div class="property-hint">支持 <code>==</code> <code>!=</code> <code>&gt;</code> <code>&gt;=</code> <code>contains</code> <code>and</code> <code>or</code>，变量直接写 ID，如 <code>llm_1 contains "投诉"</code>。结果走「是 / 否」两个出口。</div>
+        </div>
+      `;
+    }
+    if (node.config.operation !== undefined) {
+      html += `
+        <div class="property-group">
+          <label class="property-label">处理方式</label>
+          <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'operation', this.value)">
+            ${['concat', 'split', 'replace'].map(op => `<option value="${op}" ${node.config.operation === op ? 'selected' : ''}>${{ concat: '拼接文本', split: '拆分为列表', replace: '查找替换' }[op]}</option>`).join('')}
+          </select>
+        </div>
+        <div class="property-group">
+          <label class="property-label">文本片段（JSON 数组）</label>
+          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${nodeId}', 'texts', this.value)">${escapeHtml(JSON.stringify(node.config.texts ?? [], null, 2))}</textarea>
+        </div>
+        ${node.config.operation === 'split' ? `
+        <div class="property-group">
+          <label class="property-label">分隔符（写 \\n 表示换行）</label>
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.separator ?? '\\n')}" oninput="updateNodeConfig('${nodeId}', 'separator', this.value)">
+        </div>` : ''}
+        ${node.config.operation === 'replace' ? `
+        <div class="property-group">
+          <label class="property-label">查找</label>
+          <input type="text" class="property-input" value="${escapeAttr(node.config.old ?? '')}" oninput="updateNodeConfig('${nodeId}', 'old', this.value)">
+        </div>
+        <div class="property-group">
+          <label class="property-label">替换为</label>
+          <input type="text" class="property-input" value="${escapeAttr(node.config.new ?? '')}" oninput="updateNodeConfig('${nodeId}', 'new', this.value)">
+        </div>` : ''}
+      `;
+    }
+    if (node.config.source !== undefined) {
+      html += `
+        <div class="property-group">
+          <label class="property-label">列表来源</label>
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.source)}" oninput="updateNodeConfig('${nodeId}', 'source', this.value)">
+          <div class="property-hint">可写 <code>{{input}}</code> 或上游节点 ID；JSON 数组会自动识别，否则按分隔符拆分。</div>
+        </div>
+        <div class="property-group">
+          <label class="property-label">分隔符（写 \\n 表示换行）</label>
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.separator ?? '\\n')}" oninput="updateNodeConfig('${nodeId}', 'separator', this.value)">
+        </div>
+        <div class="property-group">
+          <label class="property-label">每项动作</label>
+          <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'action', this.value)">
+            <option value="llm" ${node.config.action === 'llm' ? 'selected' : ''}>调用大模型</option>
+            <option value="collect" ${node.config.action === 'collect' ? 'selected' : ''}>仅收集原项</option>
+          </select>
+        </div>
+        <div class="property-group">
+          <label class="property-label">最多处理条数</label>
+          <input type="number" class="property-input" min="1" max="100" value="${Number(node.config.max_items ?? 20)}" oninput="updateNodeConfig('${nodeId}', 'max_items', parseInt(this.value, 10))">
+        </div>
+        <div class="property-group">
+          <label class="property-label">结果连接符（写 \\n 表示换行）</label>
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.join ?? '\\n\\n')}" oninput="updateNodeConfig('${nodeId}', 'join', this.value)">
         </div>
       `;
     }
@@ -410,6 +512,17 @@ function updateNodeConfig(nodeId, key, value) {
   }
 }
 
+function updateNodeJson(nodeId, key, raw) {
+  const node = editorNodes.find(n => n.id === nodeId);
+  if (!node) return;
+  try {
+    node.config[key] = JSON.parse(raw);
+  } catch (e) {
+    return;
+  }
+  saveWorkflow();
+}
+
 function deleteNode(nodeId) {
   pushHistory();
   editorNodes = editorNodes.filter(n => n.id !== nodeId);
@@ -418,6 +531,43 @@ function deleteNode(nodeId) {
   renderCanvas();
   saveWorkflow();
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
+}
+
+async function checkWorkflow() {
+  const res = await fetch(`${API}/api/workflows/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nodes: editorNodes, edges: editorEdges }),
+  });
+  if (!res.ok) {
+    showToast('检查失败，请重试', 'error');
+    return false;
+  }
+  const data = await res.json();
+  if (data.valid) {
+    showToast('检查通过，可以直接运行', 'success');
+    return true;
+  }
+  showToast(data.problems.join('；'), 'error');
+  return false;
+}
+
+async function runWorkflow() {
+  if (editorNodes.length === 0) {
+    showToast('画布为空，请先拖入节点', 'error');
+    return;
+  }
+  if (!(await checkWorkflow())) return;
+
+  if (!currentWorkflow) {
+    currentWorkflow = { id: null, name: '未命名工作流', description: '', nodes: [], edges: [] };
+  }
+  await saveWorkflow();
+  if (!currentWorkflow.id) {
+    showToast('保存失败，无法执行', 'error');
+    return;
+  }
+  openRunModal(currentWorkflow.id, currentWorkflow.name);
 }
 
 async function saveWorkflow() {

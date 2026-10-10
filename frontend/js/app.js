@@ -12,6 +12,7 @@ const ICONS = {
 
 function navigateTo(page) {
   currentPage = page;
+  if (page !== 'execution-detail') stopLive();
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
   document.querySelector(`[data-page="${page}"]`).classList.add('active');
 
@@ -236,6 +237,11 @@ function renderEditor(container) {
           <button class="btn btn-sm" onclick="redo()" title="恢复 (Ctrl+Y)">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-5.64-11.36L23 10"/></svg>
           </button>
+          <button class="btn btn-sm" onclick="checkWorkflow()" title="检查节点与连线">检查</button>
+          <button class="btn btn-sm btn-primary" onclick="runWorkflow()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+            运行
+          </button>
           <button class="btn btn-sm" onclick="showModal('decompose-modal')">高级</button>
         </div>
         <div class="canvas" id="canvas">
@@ -352,32 +358,144 @@ async function deleteWorkflow(id) {
 }
 
 async function executeWorkflow(id) {
-  const res = await fetch(`${API}/api/workflows/${id}/execute`, {
+  const wf = workflows.find(w => w.id === id);
+  openRunModal(id, wf ? wf.name : `工作流 #${id}`);
+}
+
+let pendingRun = { workflowId: null, name: '' };
+
+function openRunModal(workflowId, name) {
+  pendingRun = { workflowId, name };
+  document.getElementById('run-workflow-name').textContent = name || `工作流 #${workflowId}`;
+  document.getElementById('run-input').value = '';
+  showModal('run-modal');
+  setTimeout(() => document.getElementById('run-input').focus(), 60);
+}
+
+async function confirmRun() {
+  const input = document.getElementById('run-input').value;
+  const res = await fetch(`${API}/api/workflows/${pendingRun.workflowId}/execute`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: {} }),
+    body: JSON.stringify({ input: { input } }),
   });
 
   if (res.ok) {
     const data = await res.json();
-    showToast(`已开始执行 (#${data.execution_id})`, 'success');
-    navigateTo('executions');
-  } else {
-    showToast('执行失败', 'error');
+    closeModal('run-modal');
+    showToast(`已开始执行 #${data.execution_id}`, 'success');
+    viewExecution(data.execution_id);
+    return;
   }
+
+  let detail = '执行失败，请重试';
+  try {
+    const body = await res.json();
+    if (body.detail) detail = body.detail;
+  } catch (e) {}
+  showToast(detail, 'error');
 }
 
 async function viewExecution(id) {
   const res = await fetch(`${API}/api/executions/${id}`);
-  if (res.ok) {
-    const exec = await res.json();
-    showExecutionDetail(exec);
+  if (!res.ok) return;
+  const exec = await res.json();
+
+  const nodeTitles = {};
+  try {
+    const wfRes = await fetch(`${API}/api/workflows/${exec.workflow_id}`);
+    if (wfRes.ok) {
+      const wf = await wfRes.json();
+      (wf.nodes || []).forEach(n => { nodeTitles[n.id] = n.title || n.type; });
+    }
+  } catch (e) {}
+
+  showExecutionDetail(exec, nodeTitles);
+}
+
+let liveSocket = null;
+let livePoller = null;
+
+function stopLive() {
+  if (liveSocket) {
+    liveSocket.onmessage = null;
+    liveSocket.onerror = null;
+    try { liveSocket.close(); } catch (e) {}
+    liveSocket = null;
+  }
+  if (livePoller) {
+    clearInterval(livePoller);
+    livePoller = null;
   }
 }
 
-function showExecutionDetail(exec) {
+function isFinished(status) {
+  return status !== 'running' && status !== 'pending';
+}
+
+function watchExecution(exec) {
+  stopLive();
+  if (isFinished(exec.status)) return;
+
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  try {
+    liveSocket = new WebSocket(`${proto}//${location.host}/ws/execute/${exec.id}`);
+    liveSocket.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'log') {
+        if (msg.data.status !== 'running') appendLogLine(msg.data);
+      } else if (msg.type === 'complete') {
+        stopLive();
+        viewExecution(exec.id);
+      }
+    };
+    liveSocket.onerror = () => pollExecution(exec.id);
+  } catch (e) {
+    pollExecution(exec.id);
+  }
+}
+
+function pollExecution(execId) {
+  if (livePoller) return;
+  livePoller = setInterval(async () => {
+    const res = await fetch(`${API}/api/executions/${execId}`);
+    if (!res.ok) return;
+    const exec = await res.json();
+    if (isFinished(exec.status)) {
+      stopLive();
+      viewExecution(execId);
+    } else {
+      renderLogs(exec.logs || []);
+    }
+  }, 1500);
+}
+
+function logLineHtml(log) {
+  const color = log.status === 'completed' ? 'var(--green)' : log.status === 'error' ? 'var(--red)' : log.status === 'skipped' ? 'var(--orange)' : 'var(--text-tertiary)';
+  const label = { completed: '完成', running: '运行', error: '错误', skipped: '跳过' }[log.status] || log.status;
+  return `<div style="display:flex;gap:10px;align-items:baseline;"><span style="color:var(--text-tertiary);font-size:11px;flex-shrink:0;">${formatTime(log.timestamp)}</span><span style="color:${color};font-weight:500;flex-shrink:0;">${label}</span><span style="color:var(--text-secondary);">${escapeHtml(log.message)}</span></div>`;
+}
+
+function renderLogs(logs) {
+  const box = document.getElementById('exec-logs');
+  if (!box) return;
+  box.innerHTML = logs.map(logLineHtml).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function appendLogLine(log) {
+  const box = document.getElementById('exec-logs');
+  if (!box) return;
+  const row = document.createElement('div');
+  row.innerHTML = logLineHtml(log);
+  box.appendChild(row.firstElementChild);
+  box.scrollTop = box.scrollHeight;
+}
+
+function showExecutionDetail(exec, nodeTitles = {}) {
   const container = document.getElementById('content-area');
   const logs = exec.logs || [];
+  const output = exec.output_data || {};
 
   const statusLabels = {
     completed: '已完成',
@@ -386,15 +504,32 @@ function showExecutionDetail(exec) {
     pending: '等待中',
   };
 
-  let logsHtml = '';
-  if (logs.length > 0) {
-    logsHtml = '<div style="background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-family: \'SF Mono\', \'Fira Code\', monospace; font-size: 12px; line-height: 1.8; max-height: 400px; overflow-y: auto;">';
-    logs.forEach(log => {
-      const color = log.status === 'completed' ? 'var(--green)' : log.status === 'error' ? 'var(--red)' : 'var(--text-tertiary)';
-      logsHtml += `<div style="display:flex;gap:10px;align-items:baseline;"><span style="color:var(--text-tertiary);font-size:11px;flex-shrink:0;">${formatTime(log.timestamp)}</span><span style="color:${color};font-weight:500;flex-shrink:0;">${statusLabels[log.status] || log.status}</span><span style="color:var(--text-secondary);">${escapeHtml(log.message)}</span></div>`;
-    });
-    logsHtml += '</div>';
+  let nodesHtml = '';
+  const nodeOutputs = output.nodes || {};
+  const entries = Object.entries(nodeOutputs);
+  if (entries.length > 0) {
+    nodesHtml = `
+      <div style="margin-top: 20px;">
+        <h3 style="font-size: 14px; color: var(--text-primary); margin-bottom: 10px; font-weight: 600;">各节点输出</h3>
+        <div style="display: flex; flex-direction: column; gap: 8px;">
+          ${entries.map(([nodeId, text], i) => `
+            <div class="node-output">
+              <div class="node-output-title">
+                <span class="node-output-index">${i + 1}</span>
+                ${escapeHtml(nodeTitles[nodeId] || nodeId)}
+                <span class="node-output-id">${escapeHtml(nodeId)}</span>
+              </div>
+              <div class="node-output-body">${escapeHtml(typeof text === 'string' ? text : JSON.stringify(text, null, 2))}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
   }
+
+  const finalBlock = output.error
+    ? `<div class="exec-error-box">${escapeHtml(String(output.error))}</div>`
+    : `<div class="exec-output-box">${escapeHtml(typeof output.output === 'string' ? output.output : JSON.stringify(output.output, null, 2)) || '（无输出）'}</div>`;
 
   container.innerHTML = `
     <div style="margin-bottom: 24px;">
@@ -410,16 +545,21 @@ function showExecutionDetail(exec) {
         </span>
         <span>工作流 ${exec.workflow_id}</span>
         <span>${formatDate(exec.started_at)}</span>
+        ${isFinished(exec.status) ? '' : '<span class="live-dot"></span><span style="color: var(--text-tertiary); font-size: 12px;">实时日志</span>'}
       </div>
     </div>
-    ${logsHtml}
-    <div style="margin-top: 24px;">
-      <h3 style="font-size: 14px; color: var(--text-primary); margin-bottom: 10px; font-weight: 600;">输出数据</h3>
-      <div style="background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 8px; padding: 16px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; line-height: 1.6; white-space: pre-wrap; max-height: 200px; overflow-y: auto; color: var(--text-secondary);">
-        ${escapeHtml(JSON.stringify(exec.output_data, null, 2))}
-      </div>
+    <div style="margin-bottom: 20px;">
+      <h3 style="font-size: 14px; color: var(--text-primary); margin-bottom: 10px; font-weight: 600;">最终输出</h3>
+      ${finalBlock}
     </div>
+    <div>
+      <h3 style="font-size: 14px; color: var(--text-primary); margin-bottom: 10px; font-weight: 600;">执行日志</h3>
+      <div id="exec-logs" class="exec-logs">${logs.map(logLineHtml).join('') || '<div style="color:var(--text-tertiary);">暂无日志</div>'}</div>
+    </div>
+    ${nodesHtml}
   `;
+
+  watchExecution(exec);
 }
 
 async function quickDecompose() {
@@ -529,20 +669,23 @@ function buildWorkflowFromDecompose(steps) {
 
   steps.forEach((step, i) => {
     const nodeId = `step_${i}`;
+    const type = nodeTypes[step.type] ? step.type : 'llm';
+    const defaults = (nodeTypes[type] && nodeTypes[type].config) || { prompt: '', model: 'qwen-plus', temperature: 0.7 };
+    const config = JSON.parse(JSON.stringify(defaults));
+    if (type === 'llm' || type === 'loop') {
+      config.prompt = step.description || config.prompt;
+    }
+
     nodes.push({
       id: nodeId,
-      type: step.type || 'llm',
+      type,
       title: step.title,
       x: x,
       y: 200,
-      config: {
-        prompt: step.description || step.input || '',
-        model: 'qwen-plus',
-        temperature: 0.7,
-      },
+      config,
     });
 
-    edges.push({ source: prevId, target: nodeId });
+    edges.push({ source: prevId, target: nodeId, sourcePort: 'output' });
     prevId = nodeId;
     x += 220;
   });
@@ -556,7 +699,7 @@ function buildWorkflowFromDecompose(steps) {
     config: {},
   });
 
-  edges.push({ source: prevId, target: 'end' });
+  edges.push({ source: prevId, target: 'end', sourcePort: 'output' });
 
   currentWorkflow.nodes = nodes;
   currentWorkflow.edges = edges;
@@ -595,8 +738,17 @@ async function updateStats() {
 function escapeHtml(text) {
   if (!text) return '';
   const div = document.createElement('div');
-  div.textContent = text;
+  div.textContent = typeof text === 'string' ? text : JSON.stringify(text, null, 2);
   return div.innerHTML;
+}
+
+function escapeAttr(value) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
 }
 
 function formatDate(dateStr) {

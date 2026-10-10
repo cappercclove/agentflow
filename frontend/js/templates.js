@@ -78,8 +78,8 @@ const WORKFLOW_TEMPLATES = [
     edges: [
       { source: 'start', target: 'llm_1' },
       { source: 'llm_1', target: 'condition_1' },
-      { source: 'condition_1', target: 'llm_2' },
-      { source: 'condition_1', target: 'llm_3' },
+      { source: 'condition_1', target: 'llm_2', sourcePort: 'true' },
+      { source: 'condition_1', target: 'llm_3', sourcePort: 'false' },
       { source: 'llm_2', target: 'end' },
       { source: 'llm_3', target: 'end' },
     ],
@@ -135,7 +135,7 @@ const WORKFLOW_TEMPLATES = [
       { id: 'start', type: 'start', title: '输入岗位信息', x: 60, y: 200, config: {} },
       { id: 'llm_1', type: 'llm', title: 'JD 分析', x: 260, y: 200, config: { prompt: '请分析以下招聘岗位要求，提取：1.核心技能要求 2.经验要求 3.学历门槛 4.加分项\n\n岗位信息：\n{{input}}', model: 'qwen-plus', temperature: 0.3 } },
       { id: 'llm_2', type: 'llm', title: '简历匹配评估', x: 480, y: 140, config: { prompt: '我有一份简历和一个岗位分析。请评估匹配度（0-100分），列出匹配项和缺失项，给出改进建议。\n\n岗位要求分析：\n{{llm_1}}\n\n我的简历：\n{{input}}', model: 'qwen-plus', temperature: 0.5 } },
-      { id: 'condition_1', type: 'condition', title: '匹配度判断', x: 700, y: 200, config: { expression: '{{llm_2}}.includes("80") || {{llm_2}}.includes("90") || {{llm_2}}.includes("100")' } },
+      { id: 'condition_1', type: 'condition', title: '匹配度判断', x: 700, y: 200, config: { condition: 'llm_2 contains "80" or llm_2 contains "90" or llm_2 contains "100"' } },
       { id: 'llm_3', type: 'llm', title: '生成求职信', x: 920, y: 120, config: { prompt: '基于以下信息，帮我写一封专业的求职信（200字以内），突出我的优势和与岗位的匹配点：\n\n岗位分析：{{llm_1}}\n匹配评估：{{llm_2}}\n原始信息：{{input}}', model: 'qwen-plus', temperature: 0.7 } },
       { id: 'llm_4', type: 'llm', title: '改进建议', x: 920, y: 300, config: { prompt: '匹配度不够理想。请给出具体改进建议：1.简历需要补充什么 2.需要学习哪些技能 3.如何突出现有经验的相关性\n\n岗位分析：{{llm_1}}\n匹配评估：{{llm_2}}', model: 'qwen-plus', temperature: 0.6 } },
       { id: 'llm_5', type: 'llm', title: '面试准备建议', x: 1140, y: 200, config: { prompt: '基于岗位分析和我的背景，预测可能的面试问题（5个），并给出回答要点：\n\n岗位分析：{{llm_1}}\n背景信息：{{input}}', model: 'qwen-plus', temperature: 0.6 } },
@@ -145,11 +145,32 @@ const WORKFLOW_TEMPLATES = [
       { source: 'start', target: 'llm_1' },
       { source: 'llm_1', target: 'llm_2' },
       { source: 'llm_2', target: 'condition_1' },
-      { source: 'condition_1', target: 'llm_3', label: '高匹配' },
-      { source: 'condition_1', target: 'llm_4', label: '需改进' },
+      { source: 'condition_1', target: 'llm_3', sourcePort: 'true' },
+      { source: 'condition_1', target: 'llm_4', sourcePort: 'false' },
       { source: 'llm_3', target: 'llm_5' },
       { source: 'llm_4', target: 'llm_5' },
       { source: 'llm_5', target: 'end' },
+    ],
+  },
+  {
+    icon: '',
+    color: '#06b6d4',
+    bg: 'rgba(6, 182, 212, 0.08)',
+    name: '批量条目处理',
+    desc: '把长文本按行拆成条目，逐项调用大模型，再汇总为一篇',
+    steps: ['拆分为条目', '逐项生成摘要', '汇总成篇'],
+    nodes: [
+      { id: 'start', type: 'start', title: '原始文本', x: 60, y: 200, config: {} },
+      { id: 'split_1', type: 'text', title: '按行拆分', x: 250, y: 200, config: { operation: 'split', texts: ['{{input}}'], separator: '\\n' } },
+      { id: 'loop_1', type: 'loop', title: '逐项摘要', x: 460, y: 200, config: { source: '{{split_1}}', separator: '\\n', action: 'llm', prompt: '请为以下条目写一句 40 字以内的中文摘要：\n{{item}}', model: 'qwen-plus', temperature: 0.5, max_items: 20, join: '\\n\\n' } },
+      { id: 'llm_1', type: 'llm', title: '汇总成篇', x: 690, y: 200, config: { prompt: '请把下面的逐条摘要整合为一段连贯的总述（不超过 200 字）：\n{{loop_1}}', model: 'qwen-plus', temperature: 0.6 } },
+      { id: 'end', type: 'end', title: '结束', x: 910, y: 200, config: {} },
+    ],
+    edges: [
+      { source: 'start', target: 'split_1', sourcePort: 'output' },
+      { source: 'split_1', target: 'loop_1', sourcePort: 'output' },
+      { source: 'loop_1', target: 'llm_1', sourcePort: 'output' },
+      { source: 'llm_1', target: 'end', sourcePort: 'output' },
     ],
   },
 ];
@@ -189,6 +210,8 @@ function getTemplateIcon(index) {
     '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>',
     '<path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/>',
     '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    '<rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 21V5a2 2 0 00-2-2h-4a2 2 0 00-2 2v16"/>',
+    '<polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 014-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 01-4 4H3"/>',
   ];
   return icons[index] || icons[0];
 }
