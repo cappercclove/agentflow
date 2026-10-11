@@ -170,7 +170,7 @@ docker-compose up -d
 |------|------|------|
 | `AGENTFLOW_ACCESS_CODE` | 空（闸门关闭） | 站点口令。设置后除 `/health`、`/login`、`/api/login` 外都要带会话 Cookie |
 | `AGENTFLOW_SESSION_SECRET` | 从口令派生 | Cookie 的 HMAC 密钥；换口令会让所有人重新登录 |
-| `AGENTFLOW_TRUST_PROXY` | 关 | 前面有 Nginx/Caddy 时开启，按 `X-Forwarded-For` 记 IP。**不开的话所有访客会被算成同一个 `127.0.0.1`，共用一份额度** |
+| `AGENTFLOW_TRUST_PROXY` | 关 | 前面有 Nginx/Caddy 时开启，按 `X-Forwarded-For` 记 IP。**没有反代时不要开**，否则真实 IP 会被记错 |
 | `AGENTFLOW_COOKIE_SECURE` | 关 | 站点走 HTTPS 时开启，Cookie 不在明文连接上发送 |
 | `AGENTFLOW_LIMIT_LOGIN` | 10 / 10 分钟 | 同一 IP 的口令尝试次数 |
 | `AGENTFLOW_LIMIT_EXECUTE` | 30 / 小时 | 同一 IP 启动的运行数 |
@@ -215,6 +215,47 @@ curl -i http://<你的IP>/            # 期望 302 -> /login
 到这里只有 HTTP，口令和会话 Cookie 是明文过网的。演示场景里这通常够用（口令只保护一份模型额度，且限流已经关掉滥用），但只要有域名就该补上 HTTPS：`sudo certbot --nginx -d <域名>`，证书签发后把 `AGENTFLOW_COOKIE_SECURE=1` 打开并 `docker compose up -d` 重启一次。
 
 > 只想临时给人看一眼、不打算配 Nginx 的话，把 `docker-compose.yml` 的端口映射改成 `"80:8000"` 直接暴露容器即可。这种情况下不要开 `AGENTFLOW_TRUST_PROXY`——没有反代加头，开了反而会把真实 IP 记错。
+
+#### 不加反代时：让容器看到访客真实 IP
+
+限流是按 IP 记数的，所以「容器里看到的源地址是不是真实 IP」直接决定它有没有生效。这件事有两个坑，而且都是**静默失效**：不报错，只是所有访客共用同一份配额。
+
+1. 配了 Nginx 却没开 `AGENTFLOW_TRUST_PROXY`，应用只读 `request.client.host`，拿到的是 `127.0.0.1`。
+2. 没配 Nginx 直发容器时，Docker 默认的 **userland proxy**（`docker-proxy` 进程）会替容器接单再自己连回去，源地址同样变成回环地址。`docker ps` 里 8001 端口的监听者是 `docker-proxy` 而不是 `containerd-shim`，就是这种情况。
+
+第二个坑在宿主机上治，`/etc/docker/daemon.json` 里关掉代理，让 iptables DNAT 直接把连接转进容器：
+
+```json
+{
+  "userland-proxy": false,
+  "log-driver": "json-file",
+  "log-opts": { "max-size": "10m", "max-file": "3" }
+}
+```
+
+同一份文件里顺手设了容器日志轮转——`log-opts` 只在**创建容器时**读取，改完要 `systemctl restart docker && docker compose up -d --force-recreate` 才生效，用 `docker inspect --format '{{json .HostConfig.LogConfig}}' <容器>` 确认 `Config` 里真的带上了 `max-size`（空 `{}` 表示还是旧配置）。
+
+验证 IP 有没有透传，最省事的是在应用写库的那次请求进行中，从容器里看连接表：
+
+```bash
+docker exec agentflow-agentflow-1 cat /proc/net/tcp | awk '$4=="01"{print $3}'
+```
+
+`01` 是 ESTABLISHED，最后一列是十六进制小端的「远端地址:端口」，把它按字节反序点开就是点分十进制。看到自己拨号的公网 IP 说明限流已经按人记账；看到 `0100007F`（127.0.0.1）或 `010011AC`（172.17.0.1）说明还在共用一条通道。
+
+#### 备份
+
+SQLite 跑在 WAL 模式下且随时有写入，直接 `cp` 数据文件可能拿到撕裂的页。`deploy/backup.sh` 改用 SQLite 的在线备份 API，从命名卷里导出一份一致性副本、跑一遍 `pragma integrity_check`，并把超过 14 天的旧副本删掉：
+
+```bash
+sudo chmod +x deploy/backup.sh
+sudo ./deploy/backup.sh          # 手动跑一次，期望输出 backup: workflows....db ok (...)
+sudo crontab -e                  # 加一行，路径换成仓库实际位置
+# 30 3 * * * /opt/agentflow/deploy/backup.sh >> /var/log/agentflow-backup.log 2>&1
+```
+
+副本默认落在 `/var/backups/agentflow`（仓库之外，`git clean -fdx` 不会带走它），最新一份固定另存为 `latest.db`，恢复步骤写在脚本末尾的注释里。卷名、镜像名、目录、保留天数都可以用 `AF_VOLUME` / `AF_IMAGE` / `AF_BACKUP_DIR` / `AF_RETAIN_DAYS` 覆盖；脚本要把备份目录 chown 给容器内那个非 root 用户，所以按 root 的计划任务来跑。
+
 
 ### 📡 API 文档
 
@@ -280,7 +321,8 @@ agentflow/
 ├── .dockerignore                # 挡住 backend/.env 与 *.db，不让密钥进镜像层
 ├── docker-compose.yml
 ├── deploy/
-│   └── nginx-agentflow.conf    # 反代模板：WebSocket Upgrade 头与 X-Forwarded-For
+│   ├── nginx-agentflow.conf    # 反代模板：WebSocket Upgrade 头与 X-Forwarded-For
+│   └── backup.sh               # SQLite 在线备份 + 14 天滚动清理（配 root 的 cron）
 ├── LICENSE
 └── README.md
 ```
@@ -292,7 +334,8 @@ agentflow/
 - [ ] 支持子工作流调用
 - [ ] 用户认证与多用户管理
 - [ ] 工作流版本控制
-- [ ] Nginx 反向代理 + HTTPS
+- [x] 公网部署：访问口令与按 IP 限流、反代模板、容器日志轮转与 SQLite 备份脚本（演示实例已在阿里云轻量服务器上线）
+- [ ] 有域名之后补 HTTPS（现在只有 HTTP，IP 直连 8001）
 
 ---
 
