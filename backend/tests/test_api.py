@@ -1,4 +1,7 @@
 import asyncio
+from datetime import datetime, timezone
+
+from models import SessionLocal, Execution
 
 
 async def test_create_workflow(client):
@@ -164,3 +167,178 @@ async def test_loop_node_aggregates_items(client):
             break
 
     assert finished.json()["output_data"]["output"] == "苹果 | 香蕉 | 橙子"
+
+
+async def test_cancel_stops_a_running_execution(client, monkeypatch):
+    import main
+
+    async def slow_node(node, context, send_log=None):
+        await asyncio.sleep(30)
+        return {"status": "success", "output": "never"}
+
+    monkeypatch.setattr(main, "execute_node", slow_node)
+
+    created = await client.post("/api/workflows", json={"name": "Slow", "nodes": [
+        {"id": "start", "type": "start", "title": "开始", "config": {}},
+        {"id": "end", "type": "end", "title": "结束", "config": {}},
+    ], "edges": [{"source": "start", "target": "end"}]})
+    wf_id = created.json()["id"]
+
+    started = await client.post(f"/api/workflows/{wf_id}/execute", json={"input": {"input": "x"}})
+    exec_id = started.json()["execution_id"]
+    await asyncio.sleep(0.05)
+
+    res = await client.post(f"/api/executions/{exec_id}/cancel")
+    assert res.status_code == 200
+
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        finished = await client.get(f"/api/executions/{exec_id}")
+        if finished.json()["status"] == "cancelled":
+            break
+
+    execution = finished.json()
+    assert execution["status"] == "cancelled"
+    assert execution["finished_at"]
+    assert any(log["status"] == "cancelled" for log in execution["logs"])
+
+
+async def test_cancel_on_a_finished_execution_is_a_no_op(client):
+    db = SessionLocal()
+    execution = Execution(
+        workflow_id=1,
+        status="completed",
+        started_at=datetime.now(timezone.utc),
+        finished_at=datetime.now(timezone.utc),
+    )
+    db.add(execution)
+    db.commit()
+    exec_id = execution.id
+    db.close()
+
+    res = await client.post(f"/api/executions/{exec_id}/cancel")
+    assert res.status_code == 200
+    assert res.json()["status"] == "completed"
+
+    missing = await client.post("/api/executions/999999/cancel")
+    assert missing.status_code == 404
+
+
+async def test_executions_still_running_after_a_restart_get_reaped(client):
+    """No task owns the row, so cancelling has to write the status itself."""
+    import main
+
+    db = SessionLocal()
+    execution = Execution(workflow_id=1, status="running", started_at=datetime.now(timezone.utc))
+    db.add(execution)
+    db.commit()
+    exec_id = execution.id
+    db.close()
+
+    assert exec_id not in main.running_tasks
+
+    res = await client.post(f"/api/executions/{exec_id}/cancel")
+    assert res.json()["status"] == "cancelled"
+
+    after = (await client.get(f"/api/executions/{exec_id}")).json()
+    assert after["status"] == "cancelled"
+    assert after["logs"][-1]["message"] == "执行已被手动停止"
+
+
+async def test_deleting_executions_respects_running_ones(client):
+    created = await client.post("/api/workflows", json={"name": "Del"})
+    wf_id = created.json()["id"]
+
+    db = SessionLocal()
+    running = Execution(workflow_id=wf_id, status="running", started_at=datetime.now(timezone.utc))
+    done = Execution(
+        workflow_id=wf_id,
+        status="completed",
+        started_at=datetime.now(timezone.utc),
+        finished_at=datetime.now(timezone.utc),
+    )
+    db.add_all([running, done])
+    db.commit()
+    running_id, done_id = running.id, done.id
+    db.close()
+
+    blocked = await client.delete(f"/api/executions/{running_id}")
+    assert blocked.status_code == 409
+    assert "停止" in blocked.json()["detail"]
+
+    assert (await client.delete(f"/api/executions/{done_id}")).status_code == 200
+    assert (await client.delete(f"/api/executions/{done_id}")).status_code == 404
+
+    cleared = await client.delete("/api/executions")
+    assert cleared.json()["deleted"] == 0
+
+    remaining = (await client.get("/api/executions")).json()
+    assert [e["id"] for e in remaining] == [running_id]
+
+
+async def test_deleting_a_workflow_stops_its_live_runs(client):
+    created = await client.post("/api/workflows", json={"name": "Cascade"})
+    wf_id = created.json()["id"]
+
+    db = SessionLocal()
+    stale = Execution(workflow_id=wf_id, status="running", started_at=datetime.now(timezone.utc))
+    db.add(stale)
+    db.commit()
+    exec_id = stale.id
+    db.close()
+
+    res = await client.delete(f"/api/workflows/{wf_id}")
+    assert res.status_code == 200
+
+    db = SessionLocal()
+    assert db.query(Execution).filter(Execution.id == exec_id).first() is None
+    db.close()
+
+
+async def test_import_workflow(client):
+    res = await client.post("/api/workflows/import", json={
+        "name": "Imported",
+        "description": "来自文件",
+        "nodes": [
+            {"id": "start", "type": "start", "x": 0, "y": 0},
+            {"id": "end", "type": "end", "x": 200, "y": 0},
+        ],
+        "edges": [{"source": "start", "target": "end"}],
+    })
+    assert res.status_code == 200
+    body = res.json()
+    assert body["node_count"] == 2
+
+    stored = await client.get(f"/api/workflows/{body['id']}")
+    assert stored.json()["name"] == "Imported"
+
+
+async def test_import_rejects_broken_shape(client):
+    res = await client.post("/api/workflows/import", json={
+        "name": "Bad",
+        "nodes": [{"id": "start", "type": "start"}, {"type": "end"}],
+        "edges": [{"source": "start", "target": "ghost"}],
+    })
+    assert res.status_code == 400
+    detail = res.json()["detail"]
+    assert "缺少 id" in detail
+    assert "不存在的节点" in detail
+
+
+async def test_import_accepts_an_unfinished_draft(client):
+    res = await client.post("/api/workflows/import", json={
+        "name": "Draft",
+        "nodes": [{"id": "a", "type": "llm", "config": {"prompt": "x"}}],
+        "edges": [],
+    })
+    assert res.status_code == 200
+
+
+async def test_validate_flags_nodes_without_id(client):
+    res = await client.post("/api/workflows/validate", json={
+        "nodes": [{"type": "start"}, {"type": "end"}],
+        "edges": [],
+    })
+    body = res.json()
+    assert body["valid"] is False
+    assert "缺少 ID" in "；".join(body["problems"])

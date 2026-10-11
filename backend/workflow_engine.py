@@ -289,6 +289,45 @@ REQUIRED_CONFIG = {
 }
 
 
+def validate_graph_shape(nodes: list, edges: list) -> list[str]:
+    """Structural checks only, so an imported draft is never rejected for being unfinished."""
+    if not isinstance(nodes, list) or not nodes:
+        return ["文件里没有节点"]
+
+    problems = []
+    ids = []
+
+    for index, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            problems.append(f"第 {index + 1} 个节点不是对象")
+            continue
+        node_id = str(node.get("id") or "").strip()
+        if not node_id:
+            problems.append(f"第 {index + 1} 个节点缺少 id")
+        else:
+            ids.append(node_id)
+        if not node.get("type"):
+            problems.append(f"节点「{node_id or index + 1}」缺少 type")
+
+    duplicated = sorted({i for i in ids if ids.count(i) > 1})
+    if duplicated:
+        problems.append(f"节点 ID 重复: {', '.join(duplicated)}")
+
+    if not isinstance(edges, list):
+        problems.append("edges 必须是数组")
+    else:
+        id_set = set(ids)
+        for index, edge in enumerate(edges):
+            if not isinstance(edge, dict):
+                problems.append(f"第 {index + 1} 条连线不是对象")
+                continue
+            for endpoint in ("source", "target"):
+                if edge.get(endpoint) not in id_set:
+                    problems.append(f"第 {index + 1} 条连线的 {endpoint} 指向不存在的节点: {edge.get(endpoint)}")
+
+    return problems
+
+
 def validate_workflow(nodes: list, edges: list) -> list[str]:
     """Return a list of human-readable problems that would break execution."""
     from node_types import NODE_TYPES
@@ -299,6 +338,10 @@ def validate_workflow(nodes: list, edges: list) -> list[str]:
     problems = []
     ids = [n.get("id") for n in nodes]
     id_set = {i for i in ids if i}
+
+    missing_ids = sum(1 for n in nodes if not str(n.get("id") or "").strip())
+    if missing_ids:
+        problems.append(f"有 {missing_ids} 个节点缺少 ID，无法连线或被其他节点引用")
 
     duplicated = sorted({i for i in id_set if ids.count(i) > 1})
     if duplicated:

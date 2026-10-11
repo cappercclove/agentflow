@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from models import engine, SessionLocal, Workflow, Execution
-from workflow_engine import execute_node, validate_workflow
+from workflow_engine import execute_node, validate_workflow, validate_graph_shape
 from llm_client import decompose_task, call_llm
 from node_types import NODE_TYPES
 
@@ -25,7 +25,10 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 active_connections: dict[int, WebSocket] = {}
 pending_tasks: set = set()
+running_tasks: dict[int, asyncio.Task] = {}
 shutdown_event = asyncio.Event()
+
+FINISHED_STATUSES = ("completed", "error", "cancelled")
 
 
 @asynccontextmanager
@@ -114,6 +117,13 @@ class NodeExecuteRequest(BaseModel):
 
 
 class ValidateRequest(BaseModel):
+    nodes: list = []
+    edges: list = []
+
+
+class WorkflowImport(BaseModel):
+    name: str = "导入的工作流"
+    description: str = ""
     nodes: list = []
     edges: list = []
 
@@ -208,6 +218,9 @@ async def delete_workflow(workflow_id: int, db: Session = Depends(get_db)):
     workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    # The cascade below deletes the Execution rows; a run still writing to them would
+    # otherwise keep committing into rows that no longer exist.
+    _cancel_executions(db, workflow_id=workflow_id)
     db.delete(workflow)
     db.commit()
     logger.info("Workflow deleted: id=%s", workflow_id)
@@ -242,7 +255,9 @@ async def execute_workflow(workflow_id: int, data: ExecuteRequest, db: Session =
     logger.info("Workflow execution started: workflow_id=%s execution_id=%s", workflow_id, exec_id)
     task = asyncio.create_task(_run_workflow(exec_id, workflow_id, nodes_snapshot, edges_snapshot, data.input))
     pending_tasks.add(task)
+    running_tasks[exec_id] = task
     task.add_done_callback(pending_tasks.discard)
+    task.add_done_callback(lambda _t: running_tasks.pop(exec_id, None))
 
     return {"execution_id": exec_id, "status": "running"}
 
@@ -280,6 +295,104 @@ async def list_executions(workflow_id: int = None, db: Session = Depends(get_db)
         }
         for e in executions
     ]
+
+
+@app.post("/api/workflows/import")
+async def import_workflow(data: WorkflowImport, db: Session = Depends(get_db)):
+    problems = validate_graph_shape(data.nodes, data.edges)
+    if problems:
+        raise HTTPException(status_code=400, detail="；".join(problems))
+
+    workflow = Workflow(
+        name=data.name or "导入的工作流",
+        description=data.description,
+        nodes=data.nodes,
+        edges=data.edges,
+    )
+    db.add(workflow)
+    db.commit()
+    db.refresh(workflow)
+    logger.info("Workflow imported: id=%s name=%s nodes=%s", workflow.id, workflow.name, len(workflow.nodes))
+    return {"id": workflow.id, "name": workflow.name, "node_count": len(workflow.nodes)}
+
+
+def _mark_cancelled(execution: Execution):
+    logs = list(execution.logs or [])
+    logs.append({
+        "node_id": "-",
+        "status": "cancelled",
+        "message": "执行已被手动停止",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    execution.logs = logs
+    execution.status = "cancelled"
+    execution.finished_at = datetime.now(timezone.utc)
+
+
+def _cancel_executions(db: Session, execution_id: int = None, workflow_id: int = None) -> int:
+    """Stop unfinished runs; returns how many are still executing in this process."""
+    query = db.query(Execution).filter(Execution.status.notin_(FINISHED_STATUSES))
+    if execution_id is not None:
+        query = query.filter(Execution.id == execution_id)
+    if workflow_id is not None:
+        query = query.filter(Execution.workflow_id == workflow_id)
+
+    live = 0
+    touched = 0
+    for execution in query.all():
+        touched += 1
+        task = running_tasks.get(execution.id)
+        if task:
+            live += 1
+            task.cancel()
+        else:
+            # Nothing is running in this process: the row is a leftover from a restart.
+            _mark_cancelled(execution)
+            active_connections.pop(execution.id, None)
+    if touched:
+        db.commit()
+    return live
+
+
+@app.post("/api/executions/{execution_id}/cancel")
+async def cancel_execution(execution_id: int, db: Session = Depends(get_db)):
+    execution = db.query(Execution).filter(Execution.id == execution_id).first()
+    if not execution:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    if execution.status in FINISHED_STATUSES:
+        return {"message": "already_finished", "status": execution.status}
+
+    live = _cancel_executions(db, execution_id=execution_id)
+    logger.info("Execution cancellation requested: execution_id=%s live=%s", execution_id, live)
+    return {"message": "cancelled", "status": "stopping" if live else "cancelled"}
+
+
+@app.delete("/api/executions/{execution_id}")
+async def delete_execution(execution_id: int, db: Session = Depends(get_db)):
+    execution = db.query(Execution).filter(Execution.id == execution_id).first()
+    if not execution:
+        raise HTTPException(status_code=404, detail="执行记录不存在")
+    if execution.status not in FINISHED_STATUSES:
+        raise HTTPException(status_code=409, detail="运行中的执行不能删除，请先停止")
+
+    db.delete(execution)
+    db.commit()
+    active_connections.pop(execution_id, None)
+    logger.info("Execution deleted: id=%s", execution_id)
+    return {"message": "Execution deleted"}
+
+
+@app.delete("/api/executions")
+async def clear_executions(db: Session = Depends(get_db)):
+    """Drop finished runs only — a live run's logs still belong to somebody's screen."""
+    deleted = (
+        db.query(Execution)
+        .filter(Execution.status.in_(FINISHED_STATUSES))
+        .delete(synchronize_session=False)
+    )
+    db.commit()
+    logger.info("Executions cleared: deleted=%s", deleted)
+    return {"deleted": deleted}
 
 
 @app.post("/api/decompose")
@@ -404,6 +517,16 @@ def _truncate(value, limit: int = 4000):
     return value
 
 
+async def _send_complete(exec_id: int, status: str, output: str):
+    ws = active_connections.get(exec_id)
+    if not ws:
+        return
+    try:
+        await ws.send_json({"type": "complete", "status": status, "output": output})
+    except Exception:
+        pass
+
+
 async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list, input_data: dict):
     db = SessionLocal()
     try:
@@ -416,7 +539,7 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
 
         context = dict(input_data)
         logs = []
-        node_map = {n["id"]: n for n in nodes}
+        node_map = {n.get("id"): n for n in nodes if n.get("id")}
         edge_map = {}
         for edge in edges:
             source = edge.get("source")
@@ -449,7 +572,7 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
         while current_nodes:
             next_nodes = []
             for node in current_nodes:
-                node_id = node["id"]
+                node_id = node.get("id")
                 if node_id in visited:
                     continue
                 visited.add(node_id)
@@ -461,12 +584,7 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
                     execution.output_data = {"error": result["output"], "nodes": node_outputs}
                     execution.finished_at = datetime.now(timezone.utc)
                     db.commit()
-                    ws = active_connections.get(exec_id)
-                    if ws:
-                        try:
-                            await ws.send_json({"type": "complete", "status": "error", "output": result["output"]})
-                        except Exception:
-                            pass
+                    await _send_complete(exec_id, "error", result["output"])
                     return
 
                 context[node_id] = result["output"]
@@ -492,13 +610,18 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
         execution.output_data = {"output": _truncate(final_output), "nodes": node_outputs}
         execution.finished_at = datetime.now(timezone.utc)
         db.commit()
+        await _send_complete(exec_id, "completed", final_output)
 
-        ws = active_connections.get(exec_id)
-        if ws:
-            try:
-                await ws.send_json({"type": "complete", "status": "completed", "output": final_output})
-            except Exception:
-                pass
+    except asyncio.CancelledError:
+        # Stopping mid-node is the only way to break a long LLM or HTTP await. The
+        # executor thread still finishes its own call; its result is simply dropped.
+        execution = db.query(Execution).filter(Execution.id == exec_id).first()
+        if execution:
+            _mark_cancelled(execution)
+            db.commit()
+        logger.info("Execution cancelled: id=%s", exec_id)
+        await _send_complete(exec_id, "cancelled", "")
+        raise
 
     except Exception as e:
         logger.exception("Workflow execution failed")

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, dialog } = require('electron');
+const { app, BrowserWindow, Menu, dialog, session } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -85,6 +85,20 @@ function createWindow() {
   Menu.setApplicationMenu(menu);
 
   mainWindow.loadURL('http://localhost:8001');
+
+  // The export button downloads a blob URL. Left alone, Electron files it into the
+  // downloads folder with no feedback, which reads to the user as a dead button.
+  session.defaultSession.on('will-download', (_event, item) => {
+    const chosen = dialog.showSaveDialogSync(mainWindow, {
+      title: '保存文件',
+      defaultPath: path.join(app.getPath('downloads'), item.getFilename()),
+    });
+    if (chosen) {
+      item.savePath = chosen;
+    } else {
+      item.cancel();
+    }
+  });
 
   mainWindow.on('closed', () => {
     mainWindow = null;

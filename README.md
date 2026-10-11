@@ -28,6 +28,7 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 - 条件分支真路由（「是 / 否」双出口，未选中的分支自动跳过）
 - 批量循环节点（列表逐项调用大模型，并发执行后聚合）
 - WebSocket 实时执行日志（含每个节点耗时与分支结果）
+- 运行可随时停止，执行记录可删除，工作流可导入导出为 JSON
 - 预设工作流模板
 
 ### 🏗️ 系统架构
@@ -68,6 +69,10 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 - **🧩 变量引用** — 节点配置中用 `{{input}}` 引用入口内容，用 `{{节点ID}}` 引用上游输出，循环节点内还可用 `{{item}}` / `{{index}}`
 - **✅ 执行前校验** — 缺少开始/结束节点、连线指向幽灵节点、必填配置为空、节点不可达时直接返回中文原因，不会跑出一个半成品结果
 - **📊 实时日志** — WebSocket 推送每个节点的起止、耗时与分支走向，断线自动降级为轮询
+- **🛑 运行可停止** — 长耗时的模型或 HTTP 节点可中途取消，取消后写入「已取消」记录并保留已产生的日志；服务重启遗留的 running 行会被自动收敛
+- **🗂 执行记录管理** — 单条停止/删除、一键清空已完成，运行中的记录不会被误删
+- **📦 导入导出** — 工作流可导出为 JSON 文件（带 `format`/`version`），导入时先做结构校验，缺 id、连线指向幽灵节点都会逐条中文报错
+- **💾 自动保存去抖** — 配置面板连续输入合并为一次提交，不再每敲一个字就 PUT
 - **📋 工作流模板** — 预设 8 个模板，含条件分流与批量循环示例
 
 **批量循环**：循环节点把上游列表逐项交给模型，配置面板可见列表来源、分隔符、并发上限。
@@ -166,11 +171,15 @@ docker-compose up -d
 | GET | `/api/workflows/{id}` | 获取工作流详情 |
 | PUT | `/api/workflows/{id}` | 更新工作流 |
 | DELETE | `/api/workflows/{id}` | 删除工作流 |
+| POST | `/api/workflows/import` | 从 JSON 文件导入工作流（只做结构校验，允许草稿） |
 | POST | `/api/workflows/{id}/execute` | 执行工作流（先做结构校验，不通过返回 400 与中文原因） |
 | POST | `/api/workflows/validate` | 只校验图结构，返回问题列表 |
 | POST | `/api/nodes/execute` | 单节点试跑（调试用） |
 | POST | `/api/decompose` | AI 任务分解 |
 | GET | `/api/executions` | 获取执行记录 |
+| POST | `/api/executions/{id}/cancel` | 停止运行中的执行（无主任务直接收敛为已取消） |
+| DELETE | `/api/executions/{id}` | 删除单条执行记录（运行中返回 409） |
+| DELETE | `/api/executions` | 清空已完成/失败/已取消的执行记录 |
 | GET | `/api/stats` | 获取统计信息 |
 | WS | `/ws/execute/{id}` | WebSocket 实时日志 |
 
@@ -196,7 +205,7 @@ agentflow/
 │   │   └── templates.js        # 内置工作流模板
 │   ├── icons/                  # 应用图标
 │   ├── manifest.json           # PWA 清单
-│   ├── sw.js                   # Service Worker 离线缓存
+│   ├── sw.js                   # Service Worker 离线缓存（改动前端资源后需同步 bump CACHE_NAME）
 │   └── offline.html            # 离线兜底页
 ├── electron.js                 # 桌面端主进程（拉起后端 + 创建窗口）
 ├── package.json                # Electron 打包配置
@@ -237,6 +246,10 @@ AgentFlow is a visual AI workflow orchestration platform. Users build automation
 - **🧩 Variable Binding** — `{{input}}` plus any upstream node id, and `{{item}}` / `{{index}}` inside a loop
 - **✅ Pre-run Validation** — Missing start/end, dangling edges, empty required config or unreachable nodes are rejected with readable messages
 - ** Real-time Logs** — WebSocket stream of per-node start/finish, duration and branch, with polling fallback
+- **🛑 Cancellable Runs** — Stop a long-running model or HTTP node mid-flight; the run is written as cancelled with the logs it already produced, and rows orphaned by a server restart are reaped
+- **🗂 Execution Hygiene** — Cancel or delete a single run, or clear finished ones in bulk, while live runs are protected
+- **📦 Import / Export** — Workflows round-trip as versioned JSON; import validates shape and reports each problem in readable Chinese
+- **💾 Debounced Autosave** — A burst of keystrokes collapses into one PUT instead of one per character
 - **📋 Workflow Templates** — 8 pre-built templates including branching and batch-loop examples
 
 ###  Quick Start

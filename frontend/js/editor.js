@@ -9,6 +9,23 @@ let history = [];
 let historyIndex = -1;
 const MAX_HISTORY = 50;
 
+let saveTimer = null;
+
+// Property fields fire on every keystroke, and each one used to PUT the whole graph.
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    saveWorkflow();
+  }, 400);
+}
+
+async function flushSave() {
+  clearTimeout(saveTimer);
+  saveTimer = null;
+  await saveWorkflow();
+}
+
 function pushHistory() {
   const state = {
     nodes: JSON.parse(JSON.stringify(editorNodes)),
@@ -500,7 +517,7 @@ function updateNodeProp(nodeId, prop, value) {
   if (node) {
     node[prop] = value;
     renderCanvas();
-    saveWorkflow();
+    scheduleSave();
   }
 }
 
@@ -508,7 +525,7 @@ function updateNodeConfig(nodeId, key, value) {
   const node = editorNodes.find(n => n.id === nodeId);
   if (node) {
     node.config[key] = value;
-    saveWorkflow();
+    scheduleSave();
   }
 }
 
@@ -520,7 +537,7 @@ function updateNodeJson(nodeId, key, raw) {
   } catch (e) {
     return;
   }
-  saveWorkflow();
+  scheduleSave();
 }
 
 function deleteNode(nodeId) {
@@ -562,7 +579,7 @@ async function runWorkflow() {
   if (!currentWorkflow) {
     currentWorkflow = { id: null, name: '未命名工作流', description: '', nodes: [], edges: [] };
   }
-  await saveWorkflow();
+  await flushSave();
   if (!currentWorkflow.id) {
     showToast('保存失败，无法执行', 'error');
     return;

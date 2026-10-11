@@ -3,6 +3,7 @@ from workflow_engine import (
     _replace_vars,
     _safe_eval_condition,
     execute_node,
+    validate_graph_shape,
     validate_workflow,
 )
 
@@ -358,3 +359,46 @@ class TestBranchRouting:
 
         edges = [{"source": "x", "target": "a"}, {"source": "x", "target": "b"}]
         assert _outgoing_edges(edges, None) == edges
+
+
+class TestGraphShapeValidation:
+    def test_empty_or_wrong_container(self):
+        assert validate_graph_shape([], []) == ["文件里没有节点"]
+        assert validate_graph_shape("start", []) == ["文件里没有节点"]
+
+    def test_draft_without_start_end_is_accepted(self):
+        nodes = [{"id": "a", "type": "llm"}, {"id": "b", "type": "end"}]
+        assert validate_graph_shape(nodes, [{"source": "a", "target": "b"}]) == []
+
+    def test_missing_id_and_type_are_located_by_position(self):
+        problems = validate_graph_shape([{"type": "llm"}, {"id": "a"}], [])
+        assert "第 1 个节点缺少 id" in problems
+        assert "节点「a」缺少 type" in problems
+
+    def test_a_node_with_neither_id_nor_type_names_both(self):
+        problems = validate_graph_shape([{}], [])
+        assert "第 1 个节点缺少 id" in problems
+        assert "节点「1」缺少 type" in problems
+
+    def test_duplicate_ids(self):
+        problems = validate_graph_shape([{"id": "a", "type": "llm"}, {"id": "a", "type": "end"}], [])
+        assert any("重复" in p for p in problems)
+
+    def test_edges_must_point_at_real_nodes(self):
+        nodes = [{"id": "a", "type": "llm"}]
+        problems = validate_graph_shape(nodes, [{"source": "a", "target": "ghost"}])
+        assert problems == ["第 1 条连线的 target 指向不存在的节点: ghost"]
+
+    def test_non_object_entries(self):
+        problems = validate_graph_shape(["start"], "not-a-list")
+        assert "第 1 个节点不是对象" in problems
+        assert "edges 必须是数组" in problems
+
+
+class TestMissingIdGuard:
+    def test_validate_reports_nodes_without_id(self):
+        problems = validate_workflow(
+            [{"type": "start"}, {"type": "end", "config": {}}],
+            [],
+        )
+        assert any("缺少 ID" in p for p in problems)

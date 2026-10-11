@@ -4,6 +4,14 @@ let currentWorkflow = null;
 let workflows = [];
 let decomposeSteps = [];
 
+const STATUS_LABELS = {
+  completed: '已完成',
+  running: '运行中',
+  error: '异常',
+  pending: '等待中',
+  cancelled: '已取消',
+};
+
 const ICONS = {
   workflows: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>',
   executions: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
@@ -62,8 +70,6 @@ async function renderDashboard(container) {
   const recentWf = stats.recent_workflows || [];
   const recentExec = stats.recent_executions || [];
 
-  const statusLabels = { completed: '已完成', running: '运行中', error: '异常', pending: '等待中' };
-
   let wfRows = '';
   if (recentWf.length > 0) {
     recentWf.forEach(wf => {
@@ -86,7 +92,7 @@ async function renderDashboard(container) {
   let execRows = '';
   if (recentExec.length > 0) {
     recentExec.forEach(exec => {
-      const label = statusLabels[exec.status] || exec.status;
+      const label = STATUS_LABELS[exec.status] || exec.status;
       const duration = exec.finished_at ? ` · 耗时 ${formatDuration(exec.started_at, exec.finished_at)}` : '';
       execRows += `
         <div class="dash-row" onclick="viewExecution(${exec.id})">
@@ -193,7 +199,18 @@ async function renderWorkflows(container) {
     return;
   }
 
-  container.innerHTML = `<div class="workflow-grid" id="workflow-list"></div>`;
+  container.innerHTML = `
+    <div class="page-toolbar">
+      <span class="page-toolbar-hint">导入会新建一份工作流，不会覆盖同名的现有工作流</span>
+      <div class="page-toolbar-actions">
+        <input type="file" id="import-file" accept="application/json,.json" style="display:none;" onchange="importWorkflowFile(this)">
+        <button class="btn btn-sm" onclick="document.getElementById('import-file').click()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          导入 JSON
+        </button>
+      </div>
+    </div>
+    <div class="workflow-grid" id="workflow-list"></div>`;
   const list = document.getElementById('workflow-list');
 
   workflows.forEach(wf => {
@@ -215,6 +232,7 @@ async function renderWorkflows(container) {
       <div class="workflow-actions">
         <button class="btn btn-sm" onclick="openWorkflow(${wf.id})">打开</button>
         <button class="btn btn-sm btn-primary" onclick="executeWorkflow(${wf.id})">执行</button>
+        <button class="btn btn-sm" onclick="exportWorkflow(${wf.id})" title="导出为 JSON 文件">导出</button>
         <button class="btn btn-sm btn-danger" onclick="deleteWorkflow(${wf.id})">删除</button>
       </div>
     `;
@@ -239,6 +257,7 @@ function renderEditor(container) {
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-5.64-11.36L23 10"/></svg>
           </button>
           <button class="btn btn-sm" onclick="checkWorkflow()" title="检查节点与连线">检查</button>
+          <button class="btn btn-sm" onclick="exportCurrentWorkflow()" title="导出为 JSON 文件">导出</button>
           <button class="btn btn-sm btn-primary" onclick="runWorkflow()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
             运行
@@ -281,16 +300,20 @@ async function renderExecutions(container) {
     return;
   }
 
-  const statusLabels = {
-    completed: '已完成',
-    running: '运行中',
-    error: '异常',
-    pending: '等待中',
-  };
+  const finishedCount = executions.filter(e => e.status === 'completed' || e.status === 'error' || e.status === 'cancelled').length;
 
-  let html = '<div style="display: flex; flex-direction: column; gap: 10px;">';
+  let html = `
+    <div class="page-toolbar">
+      <span class="page-toolbar-hint">最多显示最近 50 条，运行中的记录不会被清空</span>
+      <div class="page-toolbar-actions">
+        <button class="btn btn-sm btn-danger" ${finishedCount ? '' : 'disabled'} onclick="clearExecutions()">清空已完成 ${finishedCount ? `(${finishedCount})` : ''}</button>
+      </div>
+    </div>
+    <div style="display: flex; flex-direction: column; gap: 10px;">`;
+
   executions.forEach((exec, i) => {
-    const label = statusLabels[exec.status] || exec.status;
+    const label = STATUS_LABELS[exec.status] || exec.status;
+    const live = !isFinished(exec.status);
     const wf = workflows.find(w => w.id === exec.workflow_id);
     const duration = exec.finished_at ? ` · 耗时 ${formatDuration(exec.started_at, exec.finished_at)}` : '';
     html += `
@@ -301,12 +324,15 @@ async function renderExecutions(container) {
             <div style="font-size: 12px; color: var(--text-tertiary); margin-top: 2px;">${escapeHtml(wf ? wf.name : `工作流 #${exec.workflow_id}`)} · ${formatDate(exec.started_at)}${duration}</div>
           </div>
         </div>
-        <div style="display: flex; align-items: center; gap: 12px;">
+        <div style="display: flex; align-items: center; gap: 8px;">
           <span class="exec-status ${exec.status}">
             <span class="exec-status-dot"></span>
             ${label}
           </span>
           <button class="btn btn-sm" onclick="viewExecution(${exec.id})">查看</button>
+          ${live
+            ? `<button class="btn btn-sm btn-danger" onclick="cancelExecution(${exec.id})">停止</button>`
+            : `<button class="btn btn-sm btn-danger" onclick="deleteExecution(${exec.id})">删除</button>`}
         </div>
       </div>
     `;
@@ -370,6 +396,86 @@ async function executeWorkflow(id) {
   openRunModal(id, wf ? wf.name : `工作流 #${id}`);
 }
 
+function fileSlug(name) {
+  return (name || 'workflow').replace(/[^\w\u4e00-\u9fa5-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'workflow';
+}
+
+function downloadJson(filename, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function workflowFilePayload(name, description, nodes, edges) {
+  return {
+    format: 'agentflow-workflow',
+    version: 1,
+    name,
+    description: description || '',
+    nodes,
+    edges,
+  };
+}
+
+function exportWorkflow(id) {
+  const wf = workflows.find(w => w.id === id);
+  if (!wf) return;
+  downloadJson(`${fileSlug(wf.name)}.agentflow.json`, workflowFilePayload(wf.name, wf.description, wf.nodes || [], wf.edges || []));
+  showToast(`已导出「${wf.name}」`, 'success');
+}
+
+function exportCurrentWorkflow() {
+  if (!currentWorkflow) return;
+  if (editorNodes.length === 0) {
+    showToast('画布为空，没有可导出的节点', 'error');
+    return;
+  }
+  const name = currentWorkflow.name || '未命名工作流';
+  downloadJson(`${fileSlug(name)}.agentflow.json`, workflowFilePayload(name, currentWorkflow.description, editorNodes, editorEdges));
+  showToast('已导出当前工作流', 'success');
+}
+
+async function importWorkflowFile(input) {
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file) return;
+
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (e) {
+    showToast('文件不是合法的 JSON', 'error');
+    return;
+  }
+
+  const res = await fetch(`${API}/api/workflows/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: data.name || file.name.replace(/\.json$/i, ''),
+      description: data.description || '',
+      nodes: Array.isArray(data.nodes) ? data.nodes : [],
+      edges: Array.isArray(data.edges) ? data.edges : [],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    showToast(body.detail || '导入失败', 'error');
+    return;
+  }
+
+  const imported = await res.json();
+  showToast(`已导入「${imported.name}」，${imported.node_count} 个节点`, 'success');
+  renderPage();
+}
+
 let pendingRun = { workflowId: null, name: '' };
 
 function openRunModal(workflowId, name) {
@@ -402,6 +508,64 @@ async function confirmRun() {
     if (body.detail) detail = body.detail;
   } catch (e) {}
   showToast(detail, 'error');
+}
+
+async function waitUntilSettled(id) {
+  for (let i = 0; i < 20; i++) {
+    const res = await fetch(`${API}/api/executions/${id}`);
+    if (!res.ok) return;
+    const exec = await res.json();
+    if (isFinished(exec.status)) return;
+    await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+async function cancelExecution(id) {
+  const res = await fetch(`${API}/api/executions/${id}/cancel`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    showToast(body.detail || '停止失败，请重试', 'error');
+    return;
+  }
+  showToast('已请求停止运行', 'success');
+
+  if (currentPage === 'execution-detail') {
+    // The run writes its own「已取消」row; polling is what makes this page settle even
+    // when the WebSocket never receives a final message.
+    stopLive();
+    pollExecution(id);
+  } else {
+    await waitUntilSettled(id);
+    renderPage();
+  }
+}
+
+async function deleteExecution(id) {
+  if (!confirm(`确定删除执行记录 #${id}？日志会一并删除。`)) return;
+  const res = await fetch(`${API}/api/executions/${id}`, { method: 'DELETE' });
+  if (res.ok) {
+    showToast('已删除', 'success');
+    if (currentPage === 'execution-detail') {
+      navigateTo('executions');
+    } else {
+      renderPage();
+    }
+    return;
+  }
+  const body = await res.json().catch(() => ({}));
+  showToast(body.detail || '删除失败', 'error');
+}
+
+async function clearExecutions() {
+  if (!confirm('清空所有已完成的执行记录？运行中的不受影响。')) return;
+  const res = await fetch(`${API}/api/executions`, { method: 'DELETE' });
+  if (res.ok) {
+    const data = await res.json();
+    showToast(`已清空 ${data.deleted} 条记录`, 'success');
+    renderPage();
+    return;
+  }
+  showToast('清空失败，请重试', 'error');
 }
 
 async function viewExecution(id) {
@@ -448,9 +612,11 @@ function watchExecution(exec) {
   if (isFinished(exec.status)) return;
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  let sock;
   try {
-    liveSocket = new WebSocket(`${proto}//${location.host}/ws/execute/${exec.id}`);
-    liveSocket.onmessage = (event) => {
+    sock = new WebSocket(`${proto}//${location.host}/ws/execute/${exec.id}`);
+    liveSocket = sock;
+    sock.onmessage = (event) => {
       const msg = JSON.parse(event.data);
       if (msg.type === 'log') {
         if (msg.data.status !== 'running') appendLogLine(msg.data);
@@ -459,7 +625,15 @@ function watchExecution(exec) {
         viewExecution(exec.id);
       }
     };
-    liveSocket.onerror = () => pollExecution(exec.id);
+    sock.onerror = () => pollExecution(exec.id);
+    // A close with no 'complete' frame means the backend went away mid-run, so the
+    // record still needs a fallback that notices it stopped.
+    sock.onclose = () => {
+      if (liveSocket === sock) {
+        liveSocket = null;
+        pollExecution(exec.id);
+      }
+    };
   } catch (e) {
     pollExecution(exec.id);
   }
@@ -469,6 +643,12 @@ function pollExecution(execId) {
   if (livePoller) return;
   livePoller = setInterval(async () => {
     const res = await fetch(`${API}/api/executions/${execId}`);
+    if (res.status === 404) {
+      stopLive();
+      showToast('这条执行记录已被删除', 'error');
+      navigateTo('executions');
+      return;
+    }
     if (!res.ok) return;
     const exec = await res.json();
     if (isFinished(exec.status)) {
@@ -481,8 +661,8 @@ function pollExecution(execId) {
 }
 
 function logLineHtml(log) {
-  const color = log.status === 'completed' ? 'var(--green)' : log.status === 'error' ? 'var(--red)' : log.status === 'skipped' ? 'var(--orange)' : 'var(--text-tertiary)';
-  const label = { completed: '完成', running: '运行', error: '错误', skipped: '跳过' }[log.status] || log.status;
+  const color = log.status === 'completed' ? 'var(--green)' : log.status === 'error' ? 'var(--red)' : log.status === 'skipped' ? 'var(--orange)' : log.status === 'cancelled' ? 'var(--text-secondary)' : 'var(--text-tertiary)';
+  const label = { completed: '完成', running: '运行', error: '错误', skipped: '跳过', cancelled: '已停止' }[log.status] || log.status;
   return `<div style="display:flex;gap:10px;align-items:baseline;"><span style="color:var(--text-tertiary);font-size:11px;flex-shrink:0;">${formatTime(log.timestamp)}</span><span style="color:${color};font-weight:500;flex-shrink:0;">${label}</span><span style="color:var(--text-secondary);">${escapeHtml(log.message)}</span></div>`;
 }
 
@@ -507,12 +687,9 @@ function showExecutionDetail(exec, nodeTitles = {}, wfName = '') {
   const logs = exec.logs || [];
   const output = exec.output_data || {};
 
-  const statusLabels = {
-    completed: '已完成',
-    running: '运行中',
-    error: '异常',
-    pending: '等待中',
-  };
+  currentPage = 'execution-detail';
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+  document.querySelector('[data-page="executions"]')?.classList.add('active');
 
   let nodesHtml = '';
   const nodeOutputs = output.nodes || {};
@@ -543,15 +720,23 @@ function showExecutionDetail(exec, nodeTitles = {}, wfName = '') {
 
   container.innerHTML = `
     <div style="margin-bottom: 24px;">
-      <button class="btn" onclick="navigateTo('executions')" style="margin-bottom: 16px;">
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-        返回
-      </button>
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+        <button class="btn" onclick="navigateTo('executions')">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+          返回
+        </button>
+        ${isFinished(exec.status)
+          ? `<button class="btn btn-sm btn-danger" onclick="deleteExecution(${exec.id})">删除这条记录</button>`
+          : `<button class="btn btn-sm btn-danger" onclick="cancelExecution(${exec.id})">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+              停止运行
+            </button>`}
+      </div>
       <h2 style="font-size: 20px; color: var(--text-primary); margin-bottom: 10px; font-weight: 700; letter-spacing: -0.3px;">执行 #${exec.id}</h2>
       <div style="display: flex; gap: 16px; font-size: 13px; color: var(--text-secondary); align-items: center;">
         <span class="exec-status ${exec.status}">
           <span class="exec-status-dot"></span>
-          ${statusLabels[exec.status] || exec.status}
+          ${STATUS_LABELS[exec.status] || exec.status}
         </span>
         <span>${wfName ? escapeHtml(wfName) : `工作流 #${exec.workflow_id}`}</span>
         <span>${formatDate(exec.started_at)}</span>
