@@ -133,7 +133,7 @@ def wait_for(execution_id):
     run = None
     while time.time() < deadline:
         run = api("GET", "/api/executions/%s" % execution_id)
-        if run["status"] in ("completed", "failed", "cancelled"):
+        if run["status"] in ("completed", "error", "cancelled"):
             return run
         time.sleep(2)
     raise SystemExit("seed: execution %s still %s after %ds"

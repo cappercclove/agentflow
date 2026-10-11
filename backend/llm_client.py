@@ -14,10 +14,12 @@ def get_client(model: str = None):
 
 
 def _get_model_map():
+    # A dedicated Bailian endpoint does not necessarily serve every public model
+    # name, so each tier can be pointed at a concrete id on that endpoint.
     return {
         "qwen-plus": os.getenv("BAILIAN_MODEL", "qwen-plus"),
-        "qwen-turbo": "qwen-turbo",
-        "qwen-max": "qwen-max",
+        "qwen-turbo": os.getenv("BAILIAN_MODEL_TURBO", "qwen-turbo"),
+        "qwen-max": os.getenv("BAILIAN_MODEL_MAX", "qwen-max"),
     }
 
 

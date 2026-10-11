@@ -128,6 +128,34 @@ class TestLlmEmptyResponse:
         raise AssertionError("content=None should not pass as an answer")
 
 
+class TestModelAliases:
+    def test_a_tier_can_point_at_another_model_id(self, monkeypatch):
+        from types import SimpleNamespace
+        import llm_client
+
+        asked = {}
+
+        def create(model=None, **_kw):
+            asked["model"] = model
+            choice = SimpleNamespace(message=SimpleNamespace(content=" 收到 "))
+            return SimpleNamespace(choices=[choice])
+
+        monkeypatch.setattr(llm_client, "get_client", lambda model=None: SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+        monkeypatch.setenv("BAILIAN_MODEL_TURBO", "qwen-flash")
+
+        assert llm_client.call_llm("hi", "qwen-turbo") == "收到"
+        assert asked["model"] == "qwen-flash"
+
+    def test_unset_overrides_keep_the_public_names(self, monkeypatch):
+        import llm_client
+
+        for name in ("BAILIAN_MODEL", "BAILIAN_MODEL_TURBO", "BAILIAN_MODEL_MAX"):
+            monkeypatch.delenv(name, raising=False)
+        assert llm_client._get_model_map() == {
+            "qwen-plus": "qwen-plus", "qwen-turbo": "qwen-turbo", "qwen-max": "qwen-max"}
+
+
 class TestReplaceVars:
     def test_basic_replace(self):
         result = _replace_vars("Hello {{name}}", {"name": "World"})
