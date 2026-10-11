@@ -3,7 +3,7 @@
 ![Python](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Tests](https://img.shields.io/badge/tests-pytest-yellow?logo=pytest&logoColor=white)
+![Tests](https://github.com/cappercclove/agentflow/actions/workflows/ci.yml/badge.svg)
 
 **可视化 AI 工作流编排平台** — 拖拽节点、连线编排，让 AI 代理自动执行复杂任务
 
@@ -147,6 +147,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 # 6. 访问
 # 前端: http://localhost:8000
 # API文档: http://localhost:8000/docs
+
+# 7. 跑测试（用例不连模型、不联网，CI 里跑的就是这条命令）
+python -m pytest -q
 ```
 
 #### Docker 部署
@@ -323,6 +326,8 @@ agentflow/
 ├── deploy/
 │   ├── nginx-agentflow.conf    # 反代模板：WebSocket Upgrade 头与 X-Forwarded-For
 │   └── backup.sh               # SQLite 在线备份 + 14 天滚动清理（配 root 的 cron）
+├── .github/workflows/
+│   └── ci.yml                  # push 时跑 pytest，顶部 Tests 徽章指向的就是这条流水线
 ├── LICENSE
 └── README.md
 ```
