@@ -62,8 +62,8 @@ DEMO_WORKFLOWS = [
             edge("llm_2", "end"), edge("llm_3", "end"),
         ],
         "runs": [
-            {"input": "上周买的书收到时封面裂了一道口子，希望你们给个说法。"},
-            {"input": "请问这本书下单之后大概几天发货？"},
+            "上周买的书收到时封面裂了一道口子，希望你们给个说法。",
+            "请问这本书下单之后大概几天发货？",
         ],
     },
     {
@@ -84,13 +84,13 @@ DEMO_WORKFLOWS = [
         ],
         "edges": [edge("start", "split_1"), edge("split_1", "loop_1"),
                   edge("loop_1", "llm_1"), edge("llm_1", "end")],
-        "runs": [{"input": "\n".join([
+        "runs": ["\n".join([
             "周一：把条件节点的路由改成真正按分支选路，未选中的分支只记日志不执行",
             "周二：给运行加了取消按钮，长任务不再只能等它跑完",
             "周三：工作流支持导入导出 JSON，导入时逐条校验节点结构",
             "周四：修了 WebSocket 首包时序，页面打开慢也不会一直显示运行中",
             "周五：部署到公网服务器，配上访问口令和按 IP 的额度限制",
-        ])}],
+        ])],
     },
     {
         "name": "示例 3 · HTTP 请求：服务自检",
@@ -107,7 +107,7 @@ DEMO_WORKFLOWS = [
             node("end", "结束", "end", 730, 220, {}),
         ],
         "edges": [edge("start", "http_1"), edge("http_1", "text_1"), edge("text_1", "end")],
-        "runs": [{"input": "自检"}],
+        "runs": ["自检"],
     },
 ]
 
@@ -161,8 +161,11 @@ def main():
         if api("GET", "/api/executions?workflow_id=%d" % wf_id):
             print("seed: %s already has runs, not spending more model calls" % name)
             continue
-        for payload in spec["runs"]:
-            started = api("POST", "/api/workflows/%d/execute" % wf_id, payload, timeout=90)
+        for text in spec["runs"]:
+            # The API takes a dict, and the start node reads the "input" key out of
+            # it -- the same shape the web UI posts.
+            started = api("POST", "/api/workflows/%d/execute" % wf_id,
+                          {"input": {"input": text}}, timeout=90)
             run = wait_for(started["execution_id"])
             out = (run["output_data"] or {}).get("output", "")
             print("seed:   run #%s %s, %d log lines, %d nodes, output=%s" % (
