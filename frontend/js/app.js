@@ -947,6 +947,24 @@ function escapeAttr(value) {
     .replace(/"/g, '&quot;');
 }
 
+// For values dropped into an inline handler's own string literal, e.g.
+// oninput="updateNodeProp('X', ...)". escapeAttr is not enough there: the quote
+// that ends the JS string is not the quote that ends the attribute. The browser
+// HTML-decodes the attribute before JS parses it, so each replacement writes what
+// the JS lexer should end up seeing (&#39; would just be a bare quote).
+function escapeJsAttr(value) {
+  if (value === undefined || value === null) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\\/g, '&#92;&#92;')
+    .replace(/'/g, '\\&#39;')
+    .replace(/\n/g, '\\&#10;')
+    .replace(/\r/g, '\\&#13;');
+}
+
 // SQLite hands back the UTC datetime without an offset, so an aware parse here
 // would shift every timestamp by the viewer's own timezone.
 function parseTs(dateStr) {

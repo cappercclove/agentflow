@@ -46,6 +46,73 @@ class TestSafeEval:
         assert _safe_eval_condition("x", {"x": ""}) is False
 
 
+class TestNumericConditionsOnText:
+    def test_string_number_compares_as_number(self):
+        # Node output is always text, so `score > 50` used to raise TypeError and the
+        # node quietly took the false branch.
+        assert _safe_eval_condition("score > 50", {"score": "100"}) is True
+        assert _safe_eval_condition("score > 50", {"score": "9"}) is False
+        assert _safe_eval_condition("score == 1", {"score": "1"}) is True
+        assert _safe_eval_condition("score >= 3.5", {"score": "3.5"}) is True
+
+    def test_text_against_text_is_untouched(self):
+        assert _safe_eval_condition('name == "abc"', {"name": "abc"}) is True
+        assert _safe_eval_condition("name == 1", {"name": "abc"}) is False
+
+    def test_incomparable_text_still_raises(self):
+        try:
+            _safe_eval_condition("count > 5", {"count": "many"})
+        except TypeError:
+            return
+        raise AssertionError("expected TypeError for text against a number")
+
+    async def test_condition_note_reports_the_real_error(self):
+        logged = []
+
+        async def send_log(node_id, status, message):
+            logged.append(message)
+
+        result = await execute_node(
+            {"id": "c", "type": "condition", "config": {"condition": "count > 5"}},
+            {"count": "many"},
+            send_log,
+        )
+        assert result["branch"] == "false"
+        assert any("表达式无法求值" in m for m in logged)
+
+
+class TestLlmEmptyResponse:
+    def test_missing_content_raises_a_readable_error(self, monkeypatch):
+        from types import SimpleNamespace
+        import llm_client
+
+        completions = SimpleNamespace(create=lambda **_kw: SimpleNamespace(choices=[]))
+        monkeypatch.setattr(llm_client, "get_client", lambda model=None: SimpleNamespace(
+            chat=SimpleNamespace(completions=completions)))
+
+        try:
+            llm_client.call_llm("hi")
+        except RuntimeError as e:
+            assert "没有返回内容" in str(e)
+        else:
+            raise AssertionError("an empty completion should not pass as an answer")
+
+    def test_content_none_raises_too(self, monkeypatch):
+        from types import SimpleNamespace
+        import llm_client
+
+        choice = SimpleNamespace(message=SimpleNamespace(content=None))
+        completions = SimpleNamespace(create=lambda **_kw: SimpleNamespace(choices=[choice]))
+        monkeypatch.setattr(llm_client, "get_client", lambda model=None: SimpleNamespace(
+            chat=SimpleNamespace(completions=completions)))
+
+        try:
+            llm_client.call_llm("hi")
+        except RuntimeError:
+            return
+        raise AssertionError("content=None should not pass as an answer")
+
+
 class TestReplaceVars:
     def test_basic_replace(self):
         result = _replace_vars("Hello {{name}}", {"name": "World"})
@@ -394,6 +461,19 @@ class TestGraphShapeValidation:
         assert "第 1 个节点不是对象" in problems
         assert "edges 必须是数组" in problems
 
+    def test_hostile_id_is_rejected(self):
+        # The editor drops ids into CSS selectors, data attributes and inline
+        # handlers, so an imported file must not be able to carry quoting chars.
+        for bad in ["x',alert(1),'", 'a" onload="alert(1)', "节点", "1abc", "a" * 100]:
+            problems = validate_graph_shape([{"id": bad, "type": "llm"}], [])
+            assert any("节点 ID 只能用" in p for p in problems), bad
+
+    def test_ordinary_ids_pass(self):
+        ids = ["start", "end", "llm_1", "cond-2", "_x", "text_1760000000000"]
+        nodes = [{"id": i, "type": "llm"} for i in ids]
+        edges = [{"source": ids[0], "target": ids[1]}]
+        assert validate_graph_shape(nodes, edges) == []
+
 
 class TestMissingIdGuard:
     def test_validate_reports_nodes_without_id(self):
@@ -401,4 +481,10 @@ class TestMissingIdGuard:
             [{"type": "start"}, {"type": "end", "config": {}}],
             [],
         )
-        assert any("缺少 ID" in p for p in problems)
+        assert any("缺少 id" in p for p in problems)
+
+    def test_validate_survives_junk_entries(self):
+        # A workflow row can hold anything, and validate runs before every execute:
+        # this used to raise AttributeError instead of reporting a problem.
+        assert validate_workflow(["start", 3], []) == ["第 1 个节点不是对象", "第 2 个节点不是对象"]
+        assert validate_workflow([{"id": "a", "type": "start"}], ["x"]) == ["第 1 条连线不是对象"]

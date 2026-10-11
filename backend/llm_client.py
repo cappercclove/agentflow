@@ -30,7 +30,15 @@ def call_llm(prompt: str, model: str = "qwen-plus", temperature: float = 0.7) ->
         temperature=temperature,
         max_tokens=2048,
     )
-    return response.choices[0].message.content.strip()
+    choices = response.choices or []
+    # A content-filtered or truncated completion can come back with no choices at
+    # all, or with message.content = None. Both used to raise AttributeError here
+    # and surface as an unexplained 500; an empty string would be worse, because
+    # the workflow would keep going on nothing.
+    content = choices[0].message.content if choices else None
+    if not content or not content.strip():
+        raise RuntimeError("模型没有返回内容，请重试或更换模型")
+    return content.strip()
 
 
 def decompose_task(task: str) -> list[dict]:

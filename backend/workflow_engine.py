@@ -24,6 +24,35 @@ LOGIC_TOKENS = ("and", "or", "contains")
 
 TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?|\"[^\"]*\"|'[^']*'|==|!=|>=|<=|>|<|and|or|contains|[a-zA-Z_]\w*)")
 
+COMPARISON_OPS = ("==", "!=", ">", ">=", "<", "<=")
+
+
+def _as_number(value):
+    if isinstance(value, bool) or isinstance(value, (int, float)):
+        return None
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _align_numeric(op_name: str, left, right):
+    """Compare '10' against 5 as numbers, not as a string against an int.
+
+    Node outputs are always text, so a literal in the expression is the only side
+    that arrives typed. Without this, x > 5 raises TypeError and the node silently
+    takes the false branch.
+    """
+    if op_name not in COMPARISON_OPS or isinstance(left, type(right)):
+        return left, right
+    if isinstance(left, (int, float)) and not isinstance(left, bool):
+        converted = _as_number(right)
+        return (left, converted) if converted is not None else (left, right)
+    if isinstance(right, (int, float)) and not isinstance(right, bool):
+        converted = _as_number(left)
+        return (converted, right) if converted is not None else (left, right)
+    return left, right
+
 
 def _safe_eval_condition(expr: str, context: dict):
     tokens = [t for t in TOKEN_RE.findall(expr) if t.strip()]
@@ -60,9 +89,10 @@ def _safe_eval_condition(expr: str, context: dict):
         left = resolve(tokens[pos])
         pos += 1
         if pos < len(tokens) and tokens[pos] in SAFE_OPS:
-            op = SAFE_OPS[tokens[pos]]
+            op_name = tokens[pos]
             right = resolve(tokens[pos + 1])
-            return op(left, right), pos + 2
+            left, right = _align_numeric(op_name, left, right)
+            return SAFE_OPS[op_name](left, right), pos + 2
         return bool(left), pos
 
     result, _ = parse_or(0)
@@ -134,7 +164,7 @@ async def _exec_condition(node: dict, context: dict) -> dict:
         result = _safe_eval_condition(condition, context)
     except Exception as e:
         logger.warning("Condition node failed to evaluate: node_id=%s expr=%r error=%s", node.get("id"), condition, e)
-        return {"output": "false", "branch": "false", "note": "表达式解析失败，走 false 分支"}
+        return {"output": "false", "branch": "false", "note": f"表达式无法求值（{e}），走 false 分支"}
 
     branch = "true" if result else "false"
     return {"output": branch, "branch": branch, "note": f"分支 → {branch}"}
@@ -288,6 +318,12 @@ REQUIRED_CONFIG = {
     "http": ("url", "请求地址"),
 }
 
+# Node ids are interpolated into CSS selectors, DOM data attributes and inline
+# handlers by the editor. Constraining them here — at the only boundary an imported
+# or hand-written graph crosses — is what keeps those sites from needing to be
+# clever about characters that can never legitimately appear.
+NODE_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
+
 
 def validate_graph_shape(nodes: list, edges: list) -> list[str]:
     """Structural checks only, so an imported draft is never rejected for being unfinished."""
@@ -304,6 +340,10 @@ def validate_graph_shape(nodes: list, edges: list) -> list[str]:
         node_id = str(node.get("id") or "").strip()
         if not node_id:
             problems.append(f"第 {index + 1} 个节点缺少 id")
+        elif not NODE_ID_RE.match(node_id):
+            problems.append(
+                f"节点 ID 只能用字母、数字、下划线和连字符，且以字母或下划线开头: {node_id[:24]}"
+            )
         else:
             ids.append(node_id)
         if not node.get("type"):
@@ -336,16 +376,14 @@ def validate_workflow(nodes: list, edges: list) -> list[str]:
         return ["工作流为空，请先从左侧拖入节点"]
 
     problems = []
+    # Shape first: everything below assumes a node is a dict with an id, and a junk
+    # workflow can reach here straight from the database or /api/workflows/validate.
+    shape_problems = validate_graph_shape(nodes, edges)
+    if shape_problems:
+        return shape_problems
+
     ids = [n.get("id") for n in nodes]
     id_set = {i for i in ids if i}
-
-    missing_ids = sum(1 for n in nodes if not str(n.get("id") or "").strip())
-    if missing_ids:
-        problems.append(f"有 {missing_ids} 个节点缺少 ID，无法连线或被其他节点引用")
-
-    duplicated = sorted({i for i in id_set if ids.count(i) > 1})
-    if duplicated:
-        problems.append(f"节点 ID 重复: {', '.join(duplicated)}")
 
     starts = [n for n in nodes if n.get("type") == "start"]
     if not starts:

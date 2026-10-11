@@ -10,20 +10,48 @@ let historyIndex = -1;
 const MAX_HISTORY = 50;
 
 let saveTimer = null;
+let saveChain = Promise.resolve();
+let saveBroken = false;
 
 // Property fields fire on every keystroke, and each one used to PUT the whole graph.
+// Both the target and the graph are captured here: a save that lands after the user
+// switched workflows must write the graph it was scheduled for, not whatever happens
+// to be on the canvas by then.
 function scheduleSave() {
+  const target = currentWorkflow;
+  const snapshot = {
+    nodes: JSON.parse(JSON.stringify(editorNodes)),
+    edges: JSON.parse(JSON.stringify(editorEdges)),
+  };
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    saveWorkflow();
+    queueSave(target, snapshot);
   }, 400);
+}
+
+function queueSave(target, snapshot) {
+  // One save at a time, oldest first: two overlapping PUTs can land out of order
+  // and leave the older graph as the stored one.
+  saveChain = saveChain
+    .then(() => saveWorkflow(target, snapshot))
+    .then(() => {
+      saveBroken = false;
+    })
+    .catch((e) => {
+      // One toast per failure streak — the editor keeps retrying on every edit.
+      if (!saveBroken) {
+        saveBroken = true;
+        showToast(`自动保存失败：${e.message}，改动目前只在本地`, 'error');
+      }
+    });
+  return saveChain;
 }
 
 async function flushSave() {
   clearTimeout(saveTimer);
   saveTimer = null;
-  await saveWorkflow();
+  await queueSave(currentWorkflow);
 }
 
 function pushHistory() {
@@ -45,7 +73,7 @@ function undo() {
   editorEdges = JSON.parse(JSON.stringify(state.edges));
   selectedNode = null;
   renderCanvas();
-  saveWorkflow();
+  queueSave(currentWorkflow);
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
 }
 
@@ -57,7 +85,7 @@ function redo() {
   editorEdges = JSON.parse(JSON.stringify(state.edges));
   selectedNode = null;
   renderCanvas();
-  saveWorkflow();
+  queueSave(currentWorkflow);
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
 }
 
@@ -144,7 +172,7 @@ function createNodeElement(node) {
   const outPorts = outputs.map(port => `
     <div class="port-slot">
       ${port === 'output' ? '' : `<span class="port-label ${port}">${port === 'true' ? '是' : '否'}</span>`}
-      <div class="node-port" data-node="${node.id}" data-kind="output" data-port="${port}"></div>
+      <div class="node-port" data-node="${escapeAttr(node.id)}" data-kind="output" data-port="${escapeAttr(port)}"></div>
     </div>
   `).join('');
 
@@ -196,7 +224,7 @@ function createNodeElement(node) {
           pushHistory();
           editorEdges.push({ source, target, sourcePort });
           renderCanvas();
-          saveWorkflow();
+          queueSave(currentWorkflow);
         }
       } else if (connectingPort.nodeId === nodeId) {
         showToast('不能连接节点自身', 'error');
@@ -260,7 +288,7 @@ function renderEdges(svg) {
       pushHistory();
       editorEdges.splice(i, 1);
       renderCanvas();
-      saveWorkflow();
+      queueSave(currentWorkflow);
       showToast('已删除连线', 'success');
     });
 
@@ -303,7 +331,7 @@ function setupCanvasEvents() {
     editorNodes.push(node);
     pushHistory();
     renderCanvas();
-    saveWorkflow();
+    queueSave(currentWorkflow);
   });
 
   canvas.addEventListener('click', (e) => {
@@ -339,7 +367,7 @@ document.addEventListener('mousemove', (e) => {
 document.addEventListener('mouseup', () => {
   if (draggingNode) {
     pushHistory();
-    saveWorkflow();
+    queueSave(currentWorkflow);
   }
   draggingNode = null;
 });
@@ -359,15 +387,15 @@ function selectNode(nodeId) {
   let html = `
     <div class="property-group">
       <label class="property-label">节点 ID</label>
-      <input type="text" class="property-input" value="${node.id}" disabled style="opacity: 0.5;">
+      <input type="text" class="property-input" value="${escapeAttr(node.id)}" disabled style="opacity: 0.5;">
     </div>
     <div class="property-group">
       <label class="property-label">标题</label>
-      <input type="text" class="property-input" id="prop-title" value="${escapeHtml(node.title || '')}" oninput="updateNodeProp('${nodeId}', 'title', this.value)">
+      <input type="text" class="property-input" id="prop-title" value="${escapeAttr(node.title || '')}" oninput="updateNodeProp('${escapeJsAttr(nodeId)}', 'title', this.value)">
     </div>
     <div class="property-group">
       <label class="property-label">类型</label>
-      <input type="text" class="property-input" value="${info.label || node.type}" disabled style="opacity: 0.5;">
+      <input type="text" class="property-input" value="${escapeAttr(info.label || node.type)}" disabled style="opacity: 0.5;">
     </div>
   `;
 
@@ -379,7 +407,7 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">${promptLabel}</label>
-          <textarea class="property-textarea" oninput="updateNodeConfig('${nodeId}', 'prompt', this.value)">${escapeHtml(node.config.prompt)}</textarea>
+          <textarea class="property-textarea" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'prompt', this.value)">${escapeHtml(node.config.prompt)}</textarea>
         </div>
       `;
     }
@@ -387,7 +415,7 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">模型</label>
-          <select class="property-select" id="prop-model" onchange="updateNodeConfig('${nodeId}', 'model', this.value)">
+          <select class="property-select" id="prop-model" onchange="updateNodeConfig('${escapeJsAttr(nodeId)}', 'model', this.value)">
             <option value="qwen-turbo" ${node.config.model === 'qwen-turbo' ? 'selected' : ''}>Qwen Turbo（快速）</option>
             <option value="qwen-plus" ${node.config.model === 'qwen-plus' ? 'selected' : ''}>Qwen Plus（均衡）</option>
             <option value="qwen-max" ${node.config.model === 'qwen-max' ? 'selected' : ''}>Qwen Max（强力）</option>
@@ -398,9 +426,9 @@ function selectNode(nodeId) {
     if (node.config.temperature !== undefined) {
       html += `
         <div class="property-group">
-          <label class="property-label">温度：${node.config.temperature}</label>
-          <input type="range" class="property-input" min="0" max="1" step="0.1" value="${node.config.temperature}"
-            oninput="updateNodeConfig('${nodeId}', 'temperature', parseFloat(this.value)); this.previousElementSibling.textContent = '温度：' + this.value">
+          <label class="property-label">温度：${escapeHtml(node.config.temperature)}</label>
+          <input type="range" class="property-input" min="0" max="1" step="0.1" value="${escapeAttr(node.config.temperature)}"
+            oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'temperature', parseFloat(this.value)); this.previousElementSibling.textContent = '温度：' + this.value">
         </div>
       `;
     }
@@ -408,7 +436,7 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">请求地址</label>
-          <input type="text" class="property-input" value="${escapeAttr(node.config.url)}" oninput="updateNodeConfig('${nodeId}', 'url', this.value)">
+          <input type="text" class="property-input" value="${escapeAttr(node.config.url)}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'url', this.value)">
         </div>
       `;
     }
@@ -417,21 +445,21 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">请求方法</label>
-          <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'method', this.value)">
+          <select class="property-select" onchange="updateNodeConfig('${escapeJsAttr(nodeId)}', 'method', this.value)">
             ${methods.map(m => `<option value="${m}" ${node.config.method === m ? 'selected' : ''}>${m}</option>`).join('')}
           </select>
         </div>
         <div class="property-group">
           <label class="property-label">请求头（JSON）</label>
-          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${nodeId}', 'headers', this.value)">${escapeHtml(JSON.stringify(node.config.headers ?? {}, null, 2))}</textarea>
+          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${escapeJsAttr(nodeId)}', 'headers', this.value)">${escapeHtml(JSON.stringify(node.config.headers ?? {}, null, 2))}</textarea>
         </div>
         ${node.config.method === 'GET' ? '' : `
         <div class="property-group">
           <label class="property-label">请求体</label>
-          <textarea class="property-textarea property-mono" placeholder='{"key": "{{input}}"}' oninput="updateNodeConfig('${nodeId}', 'body', this.value)">${escapeHtml(node.config.body ?? '')}</textarea>
+          <textarea class="property-textarea property-mono" placeholder='{"key": "{{input}}"}' oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'body', this.value)">${escapeHtml(node.config.body ?? '')}</textarea>
         </div>`}
         <label class="property-check">
-          <input type="checkbox" ${node.config.fail_on_error !== false ? 'checked' : ''} onchange="updateNodeConfig('${nodeId}', 'fail_on_error', this.checked)">
+          <input type="checkbox" ${node.config.fail_on_error !== false ? 'checked' : ''} onchange="updateNodeConfig('${escapeJsAttr(nodeId)}', 'fail_on_error', this.checked)">
           <span>4xx / 5xx 视为执行失败</span>
         </label>
       `;
@@ -440,7 +468,7 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">条件表达式</label>
-          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.condition)}" oninput="updateNodeConfig('${nodeId}', 'condition', this.value)">
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.condition)}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'condition', this.value)">
           <div class="property-hint">支持 <code>==</code> <code>!=</code> <code>&gt;</code> <code>&gt;=</code> <code>contains</code> <code>and</code> <code>or</code>，变量直接写 ID，如 <code>llm_1 contains "投诉"</code>。结果走「是 / 否」两个出口。</div>
         </div>
       `;
@@ -449,27 +477,27 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">处理方式</label>
-          <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'operation', this.value)">
+          <select class="property-select" onchange="updateNodeConfig('${escapeJsAttr(nodeId)}', 'operation', this.value)">
             ${['concat', 'split', 'replace'].map(op => `<option value="${op}" ${node.config.operation === op ? 'selected' : ''}>${{ concat: '拼接文本', split: '拆分为列表', replace: '查找替换' }[op]}</option>`).join('')}
           </select>
         </div>
         <div class="property-group">
           <label class="property-label">文本片段（JSON 数组）</label>
-          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${nodeId}', 'texts', this.value)">${escapeHtml(JSON.stringify(node.config.texts ?? [], null, 2))}</textarea>
+          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${escapeJsAttr(nodeId)}', 'texts', this.value)">${escapeHtml(JSON.stringify(node.config.texts ?? [], null, 2))}</textarea>
         </div>
         ${node.config.operation === 'split' ? `
         <div class="property-group">
           <label class="property-label">分隔符（写 \\n 表示换行）</label>
-          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.separator ?? '\\n')}" oninput="updateNodeConfig('${nodeId}', 'separator', this.value)">
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.separator ?? '\\n')}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'separator', this.value)">
         </div>` : ''}
         ${node.config.operation === 'replace' ? `
         <div class="property-group">
           <label class="property-label">查找</label>
-          <input type="text" class="property-input" value="${escapeAttr(node.config.old ?? '')}" oninput="updateNodeConfig('${nodeId}', 'old', this.value)">
+          <input type="text" class="property-input" value="${escapeAttr(node.config.old ?? '')}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'old', this.value)">
         </div>
         <div class="property-group">
           <label class="property-label">替换为</label>
-          <input type="text" class="property-input" value="${escapeAttr(node.config.new ?? '')}" oninput="updateNodeConfig('${nodeId}', 'new', this.value)">
+          <input type="text" class="property-input" value="${escapeAttr(node.config.new ?? '')}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'new', this.value)">
         </div>` : ''}
       `;
     }
@@ -477,27 +505,27 @@ function selectNode(nodeId) {
       html += `
         <div class="property-group">
           <label class="property-label">列表来源</label>
-          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.source)}" oninput="updateNodeConfig('${nodeId}', 'source', this.value)">
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.source)}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'source', this.value)">
           <div class="property-hint">可写 <code>{{input}}</code> 或上游节点 ID；JSON 数组会自动识别，否则按分隔符拆分。</div>
         </div>
         <div class="property-group">
           <label class="property-label">分隔符（写 \\n 表示换行）</label>
-          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.separator ?? '\\n')}" oninput="updateNodeConfig('${nodeId}', 'separator', this.value)">
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.separator ?? '\\n')}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'separator', this.value)">
         </div>
         <div class="property-group">
           <label class="property-label">每项动作</label>
-          <select class="property-select" onchange="updateNodeConfig('${nodeId}', 'action', this.value)">
+          <select class="property-select" onchange="updateNodeConfig('${escapeJsAttr(nodeId)}', 'action', this.value)">
             <option value="llm" ${node.config.action === 'llm' ? 'selected' : ''}>调用大模型</option>
             <option value="collect" ${node.config.action === 'collect' ? 'selected' : ''}>仅收集原项</option>
           </select>
         </div>
         <div class="property-group">
           <label class="property-label">最多处理条数</label>
-          <input type="number" class="property-input" min="1" max="100" value="${Number(node.config.max_items ?? 20)}" oninput="updateNodeConfig('${nodeId}', 'max_items', parseInt(this.value, 10))">
+          <input type="number" class="property-input" min="1" max="100" value="${Number(node.config.max_items ?? 20)}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'max_items', parseInt(this.value, 10))">
         </div>
         <div class="property-group">
           <label class="property-label">结果连接符（写 \\n 表示换行）</label>
-          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.join ?? '\\n\\n')}" oninput="updateNodeConfig('${nodeId}', 'join', this.value)">
+          <input type="text" class="property-input property-mono" value="${escapeAttr(node.config.join ?? '\\n\\n')}" oninput="updateNodeConfig('${escapeJsAttr(nodeId)}', 'join', this.value)">
         </div>
       `;
     }
@@ -505,7 +533,7 @@ function selectNode(nodeId) {
 
   html += `
     <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);">
-      <button class="btn btn-danger" onclick="deleteNode('${nodeId}')" style="width: 100%;">删除节点</button>
+      <button class="btn btn-danger" onclick="deleteNode('${escapeJsAttr(nodeId)}')" style="width: 100%;">删除节点</button>
     </div>
   `;
 
@@ -546,7 +574,7 @@ function deleteNode(nodeId) {
   editorEdges = editorEdges.filter(e => e.source !== nodeId && e.target !== nodeId);
   selectedNode = null;
   renderCanvas();
-  saveWorkflow();
+  queueSave(currentWorkflow);
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
 }
 
@@ -587,34 +615,37 @@ async function runWorkflow() {
   openRunModal(currentWorkflow.id, currentWorkflow.name);
 }
 
-async function saveWorkflow() {
-  if (!currentWorkflow) return;
+async function saveWorkflow(target = currentWorkflow, snapshot) {
+  if (!target) return;
 
-  const data = {
+  const data = snapshot || {
     nodes: editorNodes,
     edges: editorEdges,
   };
 
-  if (currentWorkflow.id) {
-    await fetch(`${API}/api/workflows/${currentWorkflow.id}`, {
+  let res;
+  if (target.id) {
+    res = await fetch(`${API}/api/workflows/${target.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(data),
     });
+    if (!res.ok) {
+      throw new Error(res.status === 404 ? '这份工作流已被删除' : `服务端返回 ${res.status}`);
+    }
   } else {
-    const res = await fetch(`${API}/api/workflows`, {
+    res = await fetch(`${API}/api/workflows`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        name: currentWorkflow.name || '未命名工作流',
-        description: currentWorkflow.description || '',
+        name: target.name || '未命名工作流',
+        description: target.description || '',
         nodes: editorNodes,
         edges: editorEdges,
       }),
     });
-    if (res.ok) {
-      const wf = await res.json();
-      currentWorkflow.id = wf.id;
-    }
+    if (!res.ok) throw new Error(`服务端返回 ${res.status}`);
+    const wf = await res.json();
+    target.id = wf.id;
   }
 }

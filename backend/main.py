@@ -316,15 +316,19 @@ async def import_workflow(data: WorkflowImport, db: Session = Depends(get_db)):
     return {"id": workflow.id, "name": workflow.name, "node_count": len(workflow.nodes)}
 
 
-def _mark_cancelled(execution: Execution):
+def _append_log(execution: Execution, status: str, message: str):
     logs = list(execution.logs or [])
     logs.append({
         "node_id": "-",
-        "status": "cancelled",
-        "message": "执行已被手动停止",
+        "status": status,
+        "message": message,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     })
     execution.logs = logs
+
+
+def _mark_cancelled(execution: Execution):
+    _append_log(execution, "cancelled", "执行已被手动停止")
     execution.status = "cancelled"
     execution.finished_at = datetime.now(timezone.utc)
 
@@ -398,7 +402,13 @@ async def clear_executions(db: Session = Depends(get_db)):
 @app.post("/api/decompose")
 async def decompose(data: DecomposeRequest):
     logger.info("Task decomposition requested: task=%s", data.task[:100])
-    steps = decompose_task(data.task)
+    loop = asyncio.get_running_loop()
+    try:
+        # decompose_task blocks on an HTTP call to the model; on the event loop it
+        # would freeze every other request, including the WebSocket log streams.
+        steps = await loop.run_in_executor(None, decompose_task, data.task)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"任务分解失败：{e}")
     return {"steps": steps}
 
 
@@ -484,10 +494,18 @@ async def websocket_execute(websocket: WebSocket, execution_id: int):
     try:
         while True:
             data = await websocket.receive_text()
-            msg = json.loads(data)
-            if msg.get("type") == "ping":
+            try:
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(msg, dict) and msg.get("type") == "ping":
                 await websocket.send_json({"type": "pong"})
     except WebSocketDisconnect:
+        pass
+    finally:
+        # Anything that breaks this loop other than a clean disconnect used to leave
+        # a dead socket registered, and every later send to it failed silently — the
+        # run then looked as if it had produced no logs at all.
         active_connections.pop(execution_id, None)
 
 
@@ -625,11 +643,19 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
 
     except Exception as e:
         logger.exception("Workflow execution failed")
-        execution = db.query(Execution).filter(Execution.id == exec_id).first()
-        if execution:
-            execution.status = "error"
-            execution.output_data = {"error": str(e)}
-            execution.finished_at = datetime.now(timezone.utc)
-            db.commit()
+        try:
+            execution = db.query(Execution).filter(Execution.id == exec_id).first()
+            if execution:
+                _append_log(execution, "error", f"执行异常终止：{e}")
+                execution.status = "error"
+                execution.output_data = {"error": str(e)}
+                execution.finished_at = datetime.now(timezone.utc)
+                db.commit()
+        except Exception:
+            logger.exception("Could not persist the failure of execution %s", exec_id)
+            db.rollback()
+        # Every other exit sends this frame. Without it the socket stays open and
+        # the detail page keeps showing 运行中 for a run the database called error.
+        await _send_complete(exec_id, "error", str(e))
     finally:
         db.close()

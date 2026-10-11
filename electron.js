@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, dialog, session } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
+const http = require('http');
 
 let mainWindow;
 let backendProcess;
@@ -84,7 +85,9 @@ function createWindow() {
   ]);
   Menu.setApplicationMenu(menu);
 
-  mainWindow.loadURL('http://localhost:8001');
+  // 127.0.0.1 rather than localhost: the backend binds IPv4 only, and localhost can
+  // resolve to ::1 first.
+  mainWindow.loadURL('http://127.0.0.1:8001');
 
   // The export button downloads a blob URL. Left alone, Electron files it into the
   // downloads folder with no feedback, which reads to the user as a dead button.
@@ -119,7 +122,9 @@ function startBackend() {
 
   const backendPath = path.join(__dirname, 'backend');
 
-  backendProcess = spawn(pythonCmd, ['-m', 'uvicorn', 'main:app', '--host', '0.0.0.0', '--port', '8001'], {
+  // 127.0.0.1, not 0.0.0.0: the desktop build has no auth, and binding every
+  // interface hands the API (and the model quota behind it) to the whole network.
+  backendProcess = spawn(pythonCmd, ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8001'], {
     cwd: backendPath,
     stdio: 'pipe',
   });
@@ -142,12 +147,43 @@ function startBackend() {
   });
 }
 
-app.whenReady().then(() => {
+function backendReady() {
+  return new Promise((resolve) => {
+    const req = http.get('http://127.0.0.1:8001/api/stats', (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.on('error', () => resolve(false));
+    req.setTimeout(1000, () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function waitForBackend(attempts = 60) {
+  for (let i = 0; i < attempts; i++) {
+    if (await backendReady()) return true;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  return false;
+}
+
+app.whenReady().then(async () => {
   startBackend();
 
-  setTimeout(() => {
+  // A fixed delay raced the interpreter: on a cold start the window opened against
+  // a port nobody was listening on yet and stayed an error page.
+  if (await waitForBackend()) {
     createWindow();
-  }, 2000);
+  } else {
+    dialog.showErrorBox(
+      '后端未能启动',
+      '本地服务在 18 秒内没有响应。\n\n请确认已安装依赖：pip install -r backend/requirements.txt'
+    );
+    app.quit();
+    return;
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

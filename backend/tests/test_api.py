@@ -341,4 +341,61 @@ async def test_validate_flags_nodes_without_id(client):
     })
     body = res.json()
     assert body["valid"] is False
-    assert "缺少 ID" in "；".join(body["problems"])
+    assert "缺少 id" in "；".join(body["problems"])
+
+
+async def test_validate_survives_junk_nodes(client):
+    # Junk can already be sitting in the database, and validate runs before every
+    # execute — this used to raise AttributeError and answer with a 500.
+    res = await client.post("/api/workflows/validate", json={"nodes": ["start"], "edges": []})
+    body = res.json()
+    assert body["valid"] is False
+    assert "不是对象" in body["problems"][0]
+
+
+async def test_decompose_reports_model_failure(client, monkeypatch):
+    import main
+
+    def boom(_task):
+        raise RuntimeError("连接超时")
+
+    monkeypatch.setattr(main, "decompose_task", boom)
+    res = await client.post("/api/decompose", json={"task": "写一份周报"})
+    assert res.status_code == 502
+    assert "连接超时" in res.json()["detail"]
+
+
+async def test_unexpected_crash_still_tells_the_client_it_ended(client, monkeypatch):
+    import main
+
+    sent = []
+
+    async def fake_complete(exec_id, status, output):
+        sent.append(status)
+
+    def boom(_value):
+        raise RuntimeError("数据库写入失败")
+
+    monkeypatch.setattr(main, "_send_complete", fake_complete)
+    monkeypatch.setattr(main, "_truncate", boom)
+
+    nodes = [
+        {"id": "start", "type": "start", "config": {}},
+        {"id": "t", "type": "text", "config": {"operation": "concat", "texts": ["{{input}}"]}},
+        {"id": "end", "type": "end", "config": {}},
+    ]
+    edges = [{"source": "start", "target": "t"}, {"source": "t", "target": "end"}]
+    created = await client.post("/api/workflows", json={"name": "Crash", "nodes": nodes, "edges": edges})
+    started = await client.post(f"/api/workflows/{created.json()['id']}/execute", json={"input": {"input": "x"}})
+    exec_id = started.json()["execution_id"]
+
+    for _ in range(20):
+        await asyncio.sleep(0.05)
+        finished = await client.get(f"/api/executions/{exec_id}")
+        if finished.json()["status"] != "running":
+            break
+
+    assert finished.json()["status"] == "error"
+    assert "数据库写入失败" in finished.json()["output_data"]["error"]
+    # Without the frame the detail page would sit at 运行中 forever.
+    assert sent == ["error"]
