@@ -13,6 +13,11 @@
 
 条件节点的两个出口分别画线，未选中的分支在执行日志里记为「跳过」。
 
+> **在线演示**：<http://47.101.60.110:8001>（阿里云轻量应用服务器，华东2-上海）
+> 打开后会先进口令页，访问口令随简历/作品册一并提供，不在仓库里公开。
+> 会话 12 小时有效；未登录时 `/api/*` 一律 401，WebSocket 握手被拒。
+> 部署有效期到服务器到期日为止，如果链接打不开请直接用本地方式运行。
+
 ---
 
 ## 🇨🇳 中文
@@ -296,6 +301,8 @@ agentflow/
 ###  Introduction
 
 AgentFlow is a visual AI workflow orchestration platform. Users build automation workflows by dragging nodes and connecting edges. The system supports intelligent task decomposition, multi-model scheduling, conditional branching, and real-time execution monitoring.
+
+> **Live demo**: <http://47.101.60.110:8001> — hosted on an Alibaba Cloud Simple Application Server (Shanghai). Visitors land on an access-code page first; the code is shared with reviewers rather than committed here. Sessions last 12 hours, unauthenticated `/api/*` calls return 401, and WebSocket handshakes are refused.
 
 ### ✨ Features
 
