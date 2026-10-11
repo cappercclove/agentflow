@@ -640,10 +640,11 @@ async def _send_state_snapshot(websocket: WebSocket, execution_id: int):
             "logs": execution.logs or [],
         })
         if execution.status not in ("running", "pending"):
+            data = execution.output_data or {}
             await websocket.send_json({
                 "type": "complete",
                 "status": execution.status,
-                "output": _truncate(str((execution.output_data or {}).get("error", ""))),
+                "output": _truncate(str(data.get("error") or data.get("output") or "")),
             })
     except Exception:
         # A snapshot is only a head start; the live stream still has the run.

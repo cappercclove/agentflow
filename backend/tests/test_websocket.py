@@ -48,6 +48,21 @@ def test_snapshot_covers_a_run_that_already_ended():
         complete = ws.receive_json()
         assert complete["type"] == "complete"
         assert complete["status"] == "completed"
+        # The closing frame used to carry output_data["error"] only, so a replayed
+        # snapshot of a finished run always reported an empty result.
+        assert complete["output"] == "done"
+
+
+def test_snapshot_of_an_errored_run_carries_the_reason():
+    import main
+
+    exec_id = _make_execution(status="error", output_data={"error": "模型没有返回内容"})
+
+    with _client(main.app).websocket_connect(f"/ws/execute/{exec_id}") as ws:
+        assert ws.receive_json()["status"] == "error"
+        complete = ws.receive_json()
+        assert complete["type"] == "complete"
+        assert complete["output"] == "模型没有返回内容"
 
 
 def test_snapshot_of_a_live_run_leaves_the_stream_open():
