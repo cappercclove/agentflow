@@ -16,6 +16,8 @@
 > **在线演示**：<http://47.101.60.110:8001>（阿里云轻量应用服务器，华东2-上海）
 > 打开后会先进口令页，访问口令随简历/作品册一并提供，不在仓库里公开。
 > 会话 12 小时有效；未登录时 `/api/*` 一律 401，WebSocket 握手被拒。
+> 实例里预置了三条示例工作流，每条都真的跑通过（分支路由、批量循环、HTTP 自检），执行记录可以直接翻看。
+> 重新播种：`python3 deploy/seed_demo.py`。
 > 部署有效期到服务器到期日为止，如果链接打不开请直接用本地方式运行。
 
 ---
@@ -200,6 +202,9 @@ cp backend/.env.example backend/.env
 #    AGENTFLOW_ACCESS_CODE=...     站点口令，写了闸门才会开
 #    AGENTFLOW_TRUST_PROXY=1       下面配了 Nginx 才需要
 #    AGENTFLOW_COOKIE_SECURE=1     上了 HTTPS 才需要
+#    BAILIAN_MODEL=...             「均衡」档实际调用的模型名
+#    BAILIAN_MODEL_TURBO=...       端点没有 qwen-turbo 这个名字时，改指一个更快的在架模型
+#    BAILIAN_MODEL_MAX=...         同上，对应「强力」档
 
 # 4. 起容器（宿主 8001 → 容器 8000，工作流与执行记录落在命名卷 agentflow-data）
 #    国内宿主机从默认 PyPI 拉依赖只有几十 kB/s，构建前在项目根目录的 .env 里
@@ -325,7 +330,8 @@ agentflow/
 ├── docker-compose.yml
 ├── deploy/
 │   ├── nginx-agentflow.conf    # 反代模板：WebSocket Upgrade 头与 X-Forwarded-For
-│   └── backup.sh               # SQLite 在线备份 + 14 天滚动清理（配 root 的 cron）
+│   ├── backup.sh               # SQLite 在线备份 + 14 天滚动清理（配 root 的 cron）
+│   └── seed_demo.py            # 给公网实例播种三条示例与真实执行记录
 ├── .github/workflows/
 │   └── ci.yml                  # push 时跑 pytest，顶部 Tests 徽章指向的就是这条流水线
 ├── LICENSE
