@@ -9,7 +9,9 @@ COPY backend/ ./backend/
 COPY frontend/ ./frontend/
 
 RUN addgroup --system app && adduser --system --group app --home /app
-RUN chown -R app:app /app
+# The SQLite file lives here and the container does not run as root, so the
+# directory has to belong to that user before anything opens a database in it.
+RUN mkdir -p /app/backend/data && chown -R app:app /app
 USER app
 
 WORKDIR /app/backend

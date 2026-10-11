@@ -1,0 +1,21 @@
+# 开发机上这个目录里躺着 backend/.env（模型密钥）和跑出来的 *.db。
+# COPY backend/ 会把它们整个烧进镜像层，推出去就是泄露。
+.git
+.gitignore
+.dockerignore
+Dockerfile
+docker-compose.yml
+deploy/
+docs/
+node_modules/
+venv/
+data/
+__pycache__/
+*.pyc
+**/.env
+**/*.db
+**/*.db-wal
+**/*.db-shm
+package.json
+package-lock.json
+electron.js

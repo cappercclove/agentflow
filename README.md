@@ -147,9 +147,9 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 #### Docker 部署
 
 ```bash
-# 1. 配置环境变量
-export BAILIAN_API_KEY=your-api-key-here
-export BAILIAN_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+# 1. 配置环境变量（compose 的 env_file 指向它，文件不存在会直接起不来）
+cp backend/.env.example backend/.env
+#    填入 BAILIAN_API_KEY 与 BAILIAN_BASE_URL，公网部署再补上口令那几行
 
 # 2. 构建并启动
 docker-compose up -d
@@ -175,7 +175,39 @@ docker-compose up -d
 
 未授权时：`/api/*` 返回 401（前端收到后会跳到口令页），其余路径 302 到 `/login`，WebSocket 握手直接被拒（403）。口令页是自带样式的单文件页面，不依赖 `frontend/` 里的任何东西——那部分同样在闸门后面。会话有效期 12 小时，Cookie 为 `HttpOnly` + `SameSite=Lax`。
 
-上线前还需要：`BAILIAN_API_KEY` 只从环境变量或 `backend/.env` 注入，不要把填好的 `.env` 提交进仓库；SQLite 走 `DATABASE_URL` 指向的卷（`docker-compose.yml` 已把 `./data` 挂进容器），否则重启就丢工作流。
+上线前还需要：`BAILIAN_API_KEY` 只从环境变量或 `backend/.env` 注入，不要把填好的 `.env` 提交进仓库（`.dockerignore` 也已经把它挡在镜像之外）；SQLite 落在 `docker-compose.yml` 声明的命名卷 `agentflow-data` 里，容器重建不丢工作流。
+
+#### 上线到一台服务器
+
+以能跑 Docker 的 Linux 主机为例（阿里云轻量应用服务器、学生机都一样）：
+
+```bash
+# 1. 控制台放行 80 端口（轻量应用服务器叫「防火墙」，不在安全组里）
+# 2. 装 Docker 后拉代码
+git clone https://github.com/cappercclove/agentflow.git && cd agentflow
+
+# 3. 只写这一个文件，别把密钥留在命令行历史里
+cp backend/.env.example backend/.env
+#    BAILIAN_API_KEY=...           模型密钥
+#    AGENTFLOW_ACCESS_CODE=...     站点口令，写了闸门才会开
+#    AGENTFLOW_TRUST_PROXY=1       下面配了 Nginx 才需要
+#    AGENTFLOW_COOKIE_SECURE=1     上了 HTTPS 才需要
+
+# 4. 起容器（宿主 8001 → 容器 8000，工作流与执行记录落在命名卷 agentflow-data）
+docker compose up -d
+
+# 5. 反代：WebSocket 的 Upgrade 头和 X-Forwarded-For 都得有，仓库里备好了现成的
+sudo cp deploy/nginx-agentflow.conf /etc/nginx/conf.d/agentflow.conf
+sudo nginx -t && sudo systemctl reload nginx
+
+# 6. 自查三条：健康检查 200、未登录时 302 到口令页、登录后能跑一次
+curl -i http://<你的IP>/health
+curl -i http://<你的IP>/            # 期望 302 -> /login
+```
+
+到这里只有 HTTP，口令和会话 Cookie 是明文过网的。演示场景里这通常够用（口令只保护一份模型额度，且限流已经关掉滥用），但只要有域名就该补上 HTTPS：`sudo certbot --nginx -d <域名>`，证书签发后把 `AGENTFLOW_COOKIE_SECURE=1` 打开并 `docker compose up -d` 重启一次。
+
+> 只想临时给人看一眼、不打算配 Nginx 的话，把 `docker-compose.yml` 的端口映射改成 `"80:8000"` 直接暴露容器即可。这种情况下不要开 `AGENTFLOW_TRUST_PROXY`——没有反代加头，开了反而会把真实 IP 记错。
 
 ### 📡 API 文档
 
@@ -238,7 +270,10 @@ agentflow/
 │   ├── screenshots/            # 界面截图
 │   └── sample_workflow.json
 ├── Dockerfile
+├── .dockerignore                # 挡住 backend/.env 与 *.db，不让密钥进镜像层
 ├── docker-compose.yml
+├── deploy/
+│   └── nginx-agentflow.conf    # 反代模板：WebSocket Upgrade 头与 X-Forwarded-For
 ├── LICENSE
 └── README.md
 ```

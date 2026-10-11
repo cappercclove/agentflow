@@ -8,5 +8,11 @@ services:
     environment:
       - DATABASE_URL=sqlite:///./data/workflows.db
     volumes:
-      - ./data:/app/backend/data
+      # 命名卷而不是 ./data 绑定挂载：镜像里的 /app/backend/data 属于非 root 的 app
+      # 用户，Docker 初始化命名卷时会带上这个属主；绑定挂载则直接用宿主目录的
+      # root:root，SQLite 写不进去。
+      - agentflow-data:/app/backend/data
     restart: unless-stopped
+
+volumes:
+  agentflow-data:
