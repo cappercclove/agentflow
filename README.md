@@ -74,6 +74,7 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 - **📦 导入导出** — 工作流可导出为 JSON 文件（带 `format`/`version`），导入时先做结构校验，缺 id、连线指向幽灵节点都会逐条中文报错
 - **💾 自动保存去抖** — 配置面板连续输入合并为一次提交，保存串行排队且按调度时的快照落盘，切换工作流后不会把上一张图写进新打开的那份；保存失败会提示一次，而不是假装已经存好
 - **📋 工作流模板** — 预设 8 个模板，含条件分流与批量循环示例
+- **🔐 公网访问闸门** — 设了 `AGENTFLOW_ACCESS_CODE` 才生效：口令换 12 小时签名 Cookie，按 IP 限登录/执行/分解/试跑，全站每天还有运行次数上限；没设口令时本地和 Electron 的行为与之前完全一致
 
 **批量循环**：循环节点把上游列表逐项交给模型，配置面板可见列表来源、分隔符、并发上限。
 
@@ -156,6 +157,26 @@ docker-compose up -d
 # 3. 访问 http://localhost:8001
 ```
 
+#### 公网部署：访问口令与限流
+
+一个挂在公网地址上的 AgentFlow，任何访客都能花掉部署者的模型额度，所以加了闸门。**所有开关都只在设置了口令之后生效**，`git clone` 下来直接跑、或用 Electron 打包时，行为与之前一模一样。
+
+| 环境变量 | 默认 | 说明 |
+|------|------|------|
+| `AGENTFLOW_ACCESS_CODE` | 空（闸门关闭） | 站点口令。设置后除 `/health`、`/login`、`/api/login` 外都要带会话 Cookie |
+| `AGENTFLOW_SESSION_SECRET` | 从口令派生 | Cookie 的 HMAC 密钥；换口令会让所有人重新登录 |
+| `AGENTFLOW_TRUST_PROXY` | 关 | 前面有 Nginx/Caddy 时开启，按 `X-Forwarded-For` 记 IP。**不开的话所有访客会被算成同一个 `127.0.0.1`，共用一份额度** |
+| `AGENTFLOW_COOKIE_SECURE` | 关 | 站点走 HTTPS 时开启，Cookie 不在明文连接上发送 |
+| `AGENTFLOW_LIMIT_LOGIN` | 10 / 10 分钟 | 同一 IP 的口令尝试次数 |
+| `AGENTFLOW_LIMIT_EXECUTE` | 30 / 小时 | 同一 IP 启动的运行数 |
+| `AGENTFLOW_LIMIT_DECOMPOSE` | 10 / 小时 | 同一 IP 的 AI 任务分解次数 |
+| `AGENTFLOW_LIMIT_NODE` | 20 / 小时 | 同一 IP 的单节点试跑次数 |
+| `AGENTFLOW_DAILY_RUNS` | 200 / 天 | 全站每天可启动的运行数，校验不通过的请求不计入 |
+
+未授权时：`/api/*` 返回 401（前端收到后会跳到口令页），其余路径 302 到 `/login`，WebSocket 握手直接被拒（403）。口令页是自带样式的单文件页面，不依赖 `frontend/` 里的任何东西——那部分同样在闸门后面。会话有效期 12 小时，Cookie 为 `HttpOnly` + `SameSite=Lax`。
+
+上线前还需要：`BAILIAN_API_KEY` 只从环境变量或 `backend/.env` 注入，不要把填好的 `.env` 提交进仓库；SQLite 走 `DATABASE_URL` 指向的卷（`docker-compose.yml` 已把 `./data` 挂进容器），否则重启就丢工作流。
+
 ### 📡 API 文档
 
 启动服务后访问 `http://localhost:8000/docs` 查看交互式 API 文档。
@@ -164,7 +185,9 @@ docker-compose up -d
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/` | 前端页面 |
+| GET | `/` | 前端页面（设了访问口令且未登录时 302 到 `/login`） |
+| GET | `/login` | 口令页，闸门开启时也保持可访问 |
+| POST | `/api/login` | 校验口令并签发 12 小时会话 Cookie |
 | GET | `/api/node-types` | 获取节点类型定义 |
 | POST | `/api/workflows` | 创建工作流 |
 | GET | `/api/workflows` | 获取工作流列表 |
@@ -172,7 +195,7 @@ docker-compose up -d
 | PUT | `/api/workflows/{id}` | 更新工作流 |
 | DELETE | `/api/workflows/{id}` | 删除工作流 |
 | POST | `/api/workflows/import` | 从 JSON 文件导入工作流（只做结构校验，允许草稿） |
-| POST | `/api/workflows/{id}/execute` | 执行工作流（先做结构校验，不通过返回 400 与中文原因） |
+| POST | `/api/workflows/{id}/execute` | 执行工作流（先做结构校验，不通过返回 400 与中文原因；闸门开启时受每 IP 与每日额度约束，超限 429） |
 | POST | `/api/workflows/validate` | 只校验图结构，返回问题列表 |
 | POST | `/api/nodes/execute` | 单节点试跑（调试用） |
 | POST | `/api/decompose` | AI 任务分解 |
@@ -192,6 +215,8 @@ agentflow/
 │   ├── models.py               # SQLAlchemy 数据模型
 │   ├── workflow_engine.py      # 执行引擎（条件求值、循环并发、图校验）
 │   ├── llm_client.py           # 多模型 LLM 客户端
+│   ├── auth.py                 # 口令会话签名、按 IP 限流、每日额度（不设口令即空转）
+│   ├── login_page.py           # 自带样式的口令页
 │   ├── node_types.py           # 节点类型定义
 │   ├── tests/                  # pytest 用例
 │   ├── requirements.txt
@@ -251,6 +276,7 @@ AgentFlow is a visual AI workflow orchestration platform. Users build automation
 - **📦 Import / Export** — Workflows round-trip as versioned JSON; import validates shape and reports each problem in readable Chinese
 - **💾 Debounced Autosave** — A burst of keystrokes collapses into one queued PUT that carries the graph it was scheduled for, and a failed save says so once instead of pretending nothing happened
 - **📋 Workflow Templates** — 8 pre-built templates including branching and batch-loop examples
+- **🔐 Public Deployment Gate** — Inert until `AGENTFLOW_ACCESS_CODE` is set: the code buys a 12-hour signed cookie, per-IP budgets cover login, execute, decompose and single-node runs, and a site-wide daily cap bounds started runs. Unauthenticated API calls get 401, pages redirect to a self-contained `/login` card, and the WebSocket handshake is refused outright
 
 ###  Quick Start
 

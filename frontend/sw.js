@@ -1,4 +1,4 @@
-const CACHE_NAME = 'agentflow-v7';
+const CACHE_NAME = 'agentflow-v8';
 const ASSETS = [
   '/',
   '/static/offline.html',
@@ -34,14 +34,18 @@ self.addEventListener('message', (e) => {
 
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
-  if (e.request.url.includes('/api/') || e.request.url.includes('/ws/')) return;
+  // The gate's card must come off the network: a cached copy would keep answering
+  // "/login" after a correct code, and a redirect's body belongs to /login, not to
+  // the "/" it was requested as.
+  const url = e.request.url;
+  if (url.includes('/api/') || url.includes('/ws/') || url.includes('/login')) return;
 
   const isNav = e.request.mode === 'navigate';
 
   e.respondWith(
     caches.match(e.request).then((cached) => {
       const fetchPromise = fetch(e.request).then((response) => {
-        if (response && response.status === 200) {
+        if (response && response.status === 200 && !response.redirected) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(e.request, clone));
         }

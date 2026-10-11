@@ -10,13 +10,28 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from models import engine, SessionLocal, Workflow, Execution
 from workflow_engine import execute_node, validate_workflow, validate_graph_shape
 from llm_client import decompose_task, call_llm
 from node_types import NODE_TYPES
+from login_page import LOGIN_HTML
+from auth import (
+    DAILY_RUNS,
+    SESSION_COOKIE,
+    SESSION_TTL,
+    auth_enabled,
+    budget_message,
+    client_ip,
+    code_matches,
+    cookie_secure,
+    deny_message,
+    issue_session,
+    limit_for,
+    valid_session,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
@@ -29,6 +44,12 @@ running_tasks: dict[int, asyncio.Task] = {}
 shutdown_event = asyncio.Event()
 
 FINISHED_STATUSES = ("completed", "error", "cancelled")
+
+LOGIN_REQUIRED = "会话已过期，请重新输入访问口令"
+
+# /api/login has to stay reachable while locked out, /login is the card itself, and
+# /health is what the container's own readiness check reads.
+PUBLIC_PATHS = {"/api/login", "/login", "/health"}
 
 
 @asynccontextmanager
@@ -75,6 +96,34 @@ async def log_requests(request: Request, call_next):
     return response
 
 
+@app.middleware("http")
+async def access_gate(request: Request, call_next):
+    """Inert unless AGENTFLOW_ACCESS_CODE is set, so the desktop build is untouched."""
+    if not auth_enabled() or request.method == "OPTIONS" or request.url.path in PUBLIC_PATHS:
+        return await call_next(request)
+    if valid_session(request.cookies.get(SESSION_COOKIE)):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        # XHR calls must not be handed HTML: the SPA reads .detail and sends the
+        # browser to /login instead of trying to parse a page as a workflow.
+        return JSONResponse(status_code=401, content={"detail": LOGIN_REQUIRED})
+    # A redirect rather than the card inline: the service worker may answer "/" from
+    # cache without ever reaching the server, so the gate's own page needs its own
+    # always-network path.
+    return RedirectResponse(url="/login", status_code=302)
+
+
+def _throttle(request: Request, name: str):
+    """Per-IP budget for the endpoints that cost model calls."""
+    if not auth_enabled():
+        return None
+    allowed, retry_after = limit_for(name).allow(client_ip(request))
+    if not allowed:
+        logger.warning("Rate limited: name=%s ip=%s", name, client_ip(request))
+        return JSONResponse(status_code=429, content={"detail": deny_message(name, retry_after)})
+    return None
+
+
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
@@ -93,6 +142,37 @@ async def serve_service_worker():
 
 
 app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "..", "frontend")), name="static")
+
+
+class LoginRequest(BaseModel):
+    code: str = ""
+
+
+@app.get("/login")
+async def login_page():
+    return HTMLResponse(LOGIN_HTML)
+
+
+@app.post("/api/login")
+async def login(data: LoginRequest, request: Request):
+    limited = _throttle(request, "login")
+    if limited is not None:
+        return limited
+    if not auth_enabled():
+        return JSONResponse(content={"ok": True, "auth_enabled": False})
+    if not code_matches(data.code):
+        return JSONResponse(status_code=401, content={"detail": "口令不正确"})
+    response = JSONResponse(content={"ok": True, "auth_enabled": True})
+    response.set_cookie(
+        SESSION_COOKIE,
+        issue_session(),
+        max_age=SESSION_TTL,
+        httponly=True,
+        samesite="lax",
+        secure=cookie_secure(),
+    )
+    logger.info("Access granted from ip=%s", client_ip(request))
+    return response
 
 
 class WorkflowCreate(BaseModel):
@@ -234,7 +314,11 @@ async def delete_workflow(workflow_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/api/workflows/{workflow_id}/execute")
-async def execute_workflow(workflow_id: int, data: ExecuteRequest, db: Session = Depends(get_db)):
+async def execute_workflow(workflow_id: int, data: ExecuteRequest, request: Request, db: Session = Depends(get_db)):
+    limited = _throttle(request, "execute")
+    if limited is not None:
+        return limited
+
     workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
@@ -243,6 +327,14 @@ async def execute_workflow(workflow_id: int, data: ExecuteRequest, db: Session =
     if problems:
         logger.warning("Workflow rejected before execution: workflow_id=%s problems=%s", workflow_id, problems)
         raise HTTPException(status_code=400, detail="；".join(problems))
+
+    # Charged after validation: a workflow that never starts should not eat the
+    # day's budget either.
+    if auth_enabled():
+        within_budget, hard_max = DAILY_RUNS.consume()
+        if not within_budget:
+            logger.warning("Daily run budget exhausted: ip=%s", client_ip(request))
+            return JSONResponse(status_code=429, content={"detail": budget_message(hard_max)})
 
     execution = Execution(
         workflow_id=workflow_id,
@@ -406,7 +498,10 @@ async def clear_executions(db: Session = Depends(get_db)):
 
 
 @app.post("/api/decompose")
-async def decompose(data: DecomposeRequest):
+async def decompose(data: DecomposeRequest, request: Request):
+    limited = _throttle(request, "decompose")
+    if limited is not None:
+        return limited
     logger.info("Task decomposition requested: task=%s", data.task[:100])
     loop = asyncio.get_running_loop()
     try:
@@ -419,7 +514,10 @@ async def decompose(data: DecomposeRequest):
 
 
 @app.post("/api/nodes/execute")
-async def execute_single_node(data: NodeExecuteRequest):
+async def execute_single_node(data: NodeExecuteRequest, request: Request):
+    limited = _throttle(request, "node")
+    if limited is not None:
+        return limited
     result = await execute_node(data.node, data.context)
     return result
 
@@ -495,6 +593,12 @@ async def get_stats(db: Session = Depends(get_db)):
 
 @app.websocket("/ws/execute/{execution_id}")
 async def websocket_execute(websocket: WebSocket, execution_id: int):
+    if auth_enabled() and not valid_session(websocket.cookies.get(SESSION_COOKIE)):
+        # The HTTP gate above only covers requests, so the log stream has to check
+        # for itself. Closing before accepting means the handshake never pretends
+        # to have succeeded, and no execution state is leaked.
+        await websocket.close(code=4401)
+        return
     await websocket.accept()
     active_connections[execution_id] = websocket
     try:

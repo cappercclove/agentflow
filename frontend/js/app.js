@@ -1,4 +1,21 @@
 const API = '';
+
+let sessionExpired = false;
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (input, init) => {
+  const res = await nativeFetch(input, init);
+  // A 401 means the 12h session cookie lapsed while the page was open. /login always
+  // comes off the network, so the service worker cannot serve the card from cache.
+  // /api/login itself is excluded: a wrong code must show its message, not throw away
+  // what was typed.
+  const path = String(input);
+  if (res.status === 401 && path.includes('/api/') && !path.includes('/api/login') && !sessionExpired) {
+    sessionExpired = true;
+    location.href = '/login';
+  }
+  return res;
+};
+
 let currentPage = 'dashboard';
 let currentWorkflow = null;
 let workflows = [];
