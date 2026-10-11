@@ -1,6 +1,11 @@
 services:
   agentflow:
-    build: .
+    build:
+      context: .
+      args:
+        # 国内宿主机从默认 PyPI 拉依赖只有几十 kB/s，部署时在 .env 里
+        # 设 PIP_INDEX_URL 指向镜像站。
+        - PIP_INDEX_URL=${PIP_INDEX_URL:-https://pypi.org/simple}
     ports:
       - "8001:8000"
     env_file:

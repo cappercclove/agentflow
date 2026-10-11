@@ -182,7 +182,7 @@ docker-compose up -d
 以能跑 Docker 的 Linux 主机为例（阿里云轻量应用服务器、学生机都一样）：
 
 ```bash
-# 1. 控制台放行 80 端口（轻量应用服务器叫「防火墙」，不在安全组里）
+# 1. 控制台放行 8001 端口（轻量应用服务器叫「防火墙」，不在安全组里）
 # 2. 装 Docker 后拉代码
 git clone https://github.com/cappercclove/agentflow.git && cd agentflow
 
@@ -194,6 +194,8 @@ cp backend/.env.example backend/.env
 #    AGENTFLOW_COOKIE_SECURE=1     上了 HTTPS 才需要
 
 # 4. 起容器（宿主 8001 → 容器 8000，工作流与执行记录落在命名卷 agentflow-data）
+#    国内宿主机从默认 PyPI 拉依赖只有几十 kB/s，构建前在项目根目录的 .env 里
+#    写一行 PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ 即可走镜像站
 docker compose up -d
 
 # 5. 反代：WebSocket 的 Upgrade 头和 X-Forwarded-For 都得有，仓库里备好了现成的
