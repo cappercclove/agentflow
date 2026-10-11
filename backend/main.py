@@ -36,7 +36,13 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     if os.name == "posix":
         for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, lambda: shutdown_event.set())
+            try:
+                loop.add_signal_handler(sig, lambda: shutdown_event.set())
+            except (ValueError, NotImplementedError):
+                # Only the main thread may own signal handlers, so an app started
+                # inside another thread (or a test portal) simply loses that hook.
+                logger.info("Signal handlers unavailable on this loop")
+                break
     logger.info("Server started")
     yield
     shutdown_event.set()
@@ -492,6 +498,7 @@ async def websocket_execute(websocket: WebSocket, execution_id: int):
     await websocket.accept()
     active_connections[execution_id] = websocket
     try:
+        await _send_state_snapshot(websocket, execution_id)
         while True:
             data = await websocket.receive_text()
             try:
@@ -506,7 +513,39 @@ async def websocket_execute(websocket: WebSocket, execution_id: int):
         # Anything that breaks this loop other than a clean disconnect used to leave
         # a dead socket registered, and every later send to it failed silently — the
         # run then looked as if it had produced no logs at all.
-        active_connections.pop(execution_id, None)
+        if active_connections.get(execution_id) is websocket:
+            active_connections.pop(execution_id, None)
+
+
+async def _send_state_snapshot(websocket: WebSocket, execution_id: int):
+    """Hand the client what already happened, before listening for what comes next.
+
+    The page fetches the run, sees it still going, then opens this socket. A short
+    graph finishes inside that gap, so every log and the closing frame were already
+    sent to nobody: the client would sit at 运行中 with an open socket that never
+    closes and therefore never falls back to polling.
+    """
+    db = SessionLocal()
+    try:
+        execution = db.query(Execution).filter(Execution.id == execution_id).first()
+        if not execution:
+            return
+        await websocket.send_json({
+            "type": "snapshot",
+            "status": execution.status,
+            "logs": execution.logs or [],
+        })
+        if execution.status not in ("running", "pending"):
+            await websocket.send_json({
+                "type": "complete",
+                "status": execution.status,
+                "output": _truncate(str((execution.output_data or {}).get("error", ""))),
+            })
+    except Exception:
+        # A snapshot is only a head start; the live stream still has the run.
+        logger.exception("Could not snapshot execution %s", execution_id)
+    finally:
+        db.close()
 
 
 def _outgoing_edges(edges: list, branch: str | None) -> list:
@@ -633,12 +672,23 @@ async def _run_workflow(exec_id: int, workflow_id: int, nodes: list, edges: list
     except asyncio.CancelledError:
         # Stopping mid-node is the only way to break a long LLM or HTTP await. The
         # executor thread still finishes its own call; its result is simply dropped.
-        execution = db.query(Execution).filter(Execution.id == exec_id).first()
-        if execution:
-            _mark_cancelled(execution)
-            db.commit()
+        try:
+            execution = db.query(Execution).filter(Execution.id == exec_id).first()
+            if execution:
+                _mark_cancelled(execution)
+                db.commit()
+        except Exception:
+            # WAL makes this unlikely, but a locked write here would otherwise leave
+            # the row at running and skip the frame below.
+            logger.exception("Could not persist the cancellation of execution %s", exec_id)
+            db.rollback()
         logger.info("Execution cancelled: id=%s", exec_id)
-        await _send_complete(exec_id, "cancelled", "")
+        try:
+            # Another 停止 click lands while this handler is still working; shield so
+            # the client is told the run ended instead of waiting on nothing.
+            await asyncio.shield(_send_complete(exec_id, "cancelled", ""))
+        except Exception:
+            pass
         raise
 
     except Exception as e:

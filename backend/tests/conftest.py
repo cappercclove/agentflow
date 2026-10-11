@@ -11,6 +11,7 @@ from httpx import AsyncClient, ASGITransport
 
 from models import Base, engine, SessionLocal
 from main import app, get_db
+import main
 
 
 def override_get_db():
@@ -27,8 +28,15 @@ app.dependency_overrides[get_db] = override_get_db
 @pytest.fixture(autouse=True)
 def setup_db():
     Base.metadata.create_all(bind=engine)
+    # Both registries are module globals keyed by the primary key, and the table is
+    # rebuilt for every test, so ids repeat. A leftover entry makes one test's run
+    # send its frames into the previous test's socket.
+    main.active_connections.clear()
+    main.running_tasks.clear()
     yield
     Base.metadata.drop_all(bind=engine)
+    main.active_connections.clear()
+    main.running_tasks.clear()
 
 
 @pytest_asyncio.fixture

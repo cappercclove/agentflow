@@ -61,14 +61,14 @@ AgentFlow 是一个基于可视化编排的 AI 工作流平台。用户通过拖
 
 - **🎨 可视化编辑器** — 拖拽节点、SVG 连线、实时预览、Ctrl+Z 撤销
 - **🤖 AI 任务分解** — 输入复杂任务，自动拆分为可执行子任务
-- **🔀 条件分支** — 表达式求值（`==` `!=` `>` `>=` `<` `<=` `contains` `and` `or`），结果从「是 / 否」两个端口分流，未选中的分支在执行日志中记为「跳过」；节点输出都是文本，`score > 50` 会先把文本按数值对齐再比较，求不了值时把原因写进日志而不是静默走 false
-- **🔁 批量循环** — 把上游列表（JSON 数组或按分隔符拆分的文本）逐项交给大模型，3 路并发、条数上限可调，结果聚合为一段
+- **🔀 条件分支** — 表达式求值（`==` `!=` `>` `>=` `<` `<=` `contains` `and` `or`），结果从「是 / 否」两个端口分流，未选中的分支在执行日志中记为「跳过」；`and` 比 `or` 结合更紧，`x or y and z` 里 x 命中就走「是」，不会被后面的 `and` 拉回去；节点输出都是文本，`score > 50` 会先把文本按数值对齐再比较，求不了值时把原因写进日志而不是静默走 false
+- **🔁 批量循环** — 把上游列表（JSON 数组或按分隔符拆分的文本）逐项交给大模型，3 路并发、条数上限可调，结果聚合为一段；哪项失败由执行结果自己标记，不靠输出文本的前缀猜
 - **🌐 HTTP 请求** — GET / POST / PUT / PATCH / DELETE，支持自定义请求头与请求体，可配置 4xx/5xx 是否判定为失败
 - **📝 文本处理** — 拼接、拆分为列表、查找替换
 - **⚡ 多模型调度** — 不同节点使用不同模型（turbo/plus/max）
-- **🧩 变量引用** — 节点配置中用 `{{input}}` 引用入口内容，用 `{{节点ID}}` 引用上游输出，循环节点内还可用 `{{item}}` / `{{index}}`
+- **🧩 变量引用** — 节点配置中用 `{{input}}` 引用入口内容，用 `{{节点ID}}` 引用上游输出，循环节点内还可用 `{{item}}` / `{{index}}`；整串文本只扫一遍做替换，所以上游输出里恰好写着 `{{别的节点}}` 时它只是一个字符串，不会被再代入别人的结果
 - **✅ 执行前校验** — 缺少开始/结束节点、连线指向幽灵节点、必填配置为空、节点不可达时直接返回中文原因，不会跑出一个半成品结果；节点 ID 只允许字母、数字、下划线和连字符，因为编辑器要把 ID 写进 CSS 选择器和内联事件，导入外部 JSON 时这条规则挡掉了能执行脚本的 ID
-- **📊 实时日志** — WebSocket 推送每个节点的起止、耗时与分支走向，断线自动降级为轮询
+- **📊 实时日志** — WebSocket 推送每个节点的起止、耗时与分支走向，连上时先补一份已有的日志与状态，断线自动降级为轮询
 - **🛑 运行可停止** — 长耗时的模型或 HTTP 节点可中途取消，取消后写入「已取消」记录并保留已产生的日志；服务重启遗留的 running 行会被自动收敛，意外崩溃同样会写回 error 并通知前端，不会把界面永远卡在「运行中」
 - **🗂 执行记录管理** — 单条停止/删除、一键清空已完成，运行中的记录不会被误删
 - **📦 导入导出** — 工作流可导出为 JSON 文件（带 `format`/`version`），导入时先做结构校验，缺 id、连线指向幽灵节点都会逐条中文报错
@@ -181,7 +181,7 @@ docker-compose up -d
 | DELETE | `/api/executions/{id}` | 删除单条执行记录（运行中返回 409） |
 | DELETE | `/api/executions` | 清空已完成/失败/已取消的执行记录 |
 | GET | `/api/stats` | 获取统计信息 |
-| WS | `/ws/execute/{id}` | WebSocket 实时日志 |
+| WS | `/ws/execute/{id}` | WebSocket 实时日志（连接即收到 `snapshot`，已结束的还会补一帧 `complete`） |
 
 ###  项目结构
 
@@ -239,13 +239,13 @@ AgentFlow is a visual AI workflow orchestration platform. Users build automation
 
 - **🎨 Visual Editor** — Drag-and-drop nodes, port-anchored SVG edges, undo/redo
 - **🤖 AI Task Decomposition** — Automatically split complex tasks into subtasks
-- **🔀 Real Branch Routing** — Expressions (`==` `!=` `>` `contains` `and` `or`) pick the 是/否 output port; the untaken branch is logged as skipped instead of executed
-- **🔁 Batch Loop** — Feed a list (JSON array or split text) item by item into the model, 3-way concurrent, capped and joined back into one result
+- **🔀 Real Branch Routing** — Expressions (`==` `!=` `>` `contains` `and` `or`) pick the 是/否 output port; the untaken branch is logged as skipped instead of executed. `and` binds tighter than `or`, so a rule that reads "x, or y and z" still takes the true branch when x alone matches
+- **🔁 Batch Loop** — Feed a list (JSON array or split text) item by item into the model, 3-way concurrent, capped and joined back into one result. Whether an item failed travels with its text instead of being guessed from a prefix, so an answer that happens to start like a failure message is not counted as one
 - **🌐 HTTP Requests** — GET / POST / PUT / PATCH / DELETE with headers and body, optional fail-on-4xx/5xx
 - **📝 Text Processing** — Concatenate, split into a list, replace
-- **🧩 Variable Binding** — `{{input}}` plus any upstream node id, and `{{item}}` / `{{index}}` inside a loop
+- **🧩 Variable Binding** — `{{input}}` plus any upstream node id, and `{{item}}` / `{{index}}` inside a loop. Substitution is a single pass, so upstream output that happens to contain `{{something}}` stays the text it is rather than picking up another node's value
 - **✅ Pre-run Validation** — Missing start/end, dangling edges, empty required config or unreachable nodes are rejected with readable messages. Node ids are limited to `[A-Za-z_][A-Za-z0-9_-]*` because the editor writes them into CSS selectors and inline handlers, so an imported file cannot smuggle in a script-executing id
-- ** Real-time Logs** — WebSocket stream of per-node start/finish, duration and branch, with polling fallback
+- **📊 Real-time Logs** — WebSocket stream of per-node start/finish, duration and branch. The socket opens with a snapshot of what already happened, so a run that finishes while the page is still fetching its first copy does not sit at 运行中, and a dropped connection falls back to polling
 - **🛑 Cancellable Runs** — Stop a long-running model or HTTP node mid-flight; the run is written as cancelled with the logs it already produced, and rows orphaned by a server restart are reaped
 - **🗂 Execution Hygiene** — Cancel or delete a single run, or clear finished ones in bulk, while live runs are protected
 - **📦 Import / Export** — Workflows round-trip as versioned JSON; import validates shape and reports each problem in readable Chinese

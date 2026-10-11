@@ -618,7 +618,11 @@ function watchExecution(exec) {
     liveSocket = sock;
     sock.onmessage = (event) => {
       const msg = JSON.parse(event.data);
-      if (msg.type === 'log') {
+      if (msg.type === 'snapshot') {
+        // Everything that already happened, as one replace rather than a replay
+        // of lines the page fetched a moment ago.
+        renderLogs(msg.logs || []);
+      } else if (msg.type === 'log') {
         if (msg.data.status !== 'running') appendLogLine(msg.data);
       } else if (msg.type === 'complete') {
         stopLive();

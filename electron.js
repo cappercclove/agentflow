@@ -19,10 +19,12 @@ function findPython() {
 
   for (const cmd of candidates) {
     try {
-      const test = spawn(cmd, ['--version'], { stdio: 'pipe' });
-      let output = '';
-      test.stdout.on('data', (d) => (output += d));
-      test.stderr.on('data', (d) => (output += d));
+      const test = spawn(cmd, ['--version'], { stdio: 'ignore' });
+      // A command that isn't installed reports itself as an asynchronous 'error'
+      // event. With no listener attached that is an uncaught exception, which took
+      // the whole app down before the "Python 未找到" dialog could be shown.
+      test.on('error', () => {});
+      test.unref();
       if (test.pid) return cmd;
     } catch (e) {}
   }

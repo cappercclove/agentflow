@@ -26,6 +26,12 @@ TOKEN_RE = re.compile(r"(\d+(?:\.\d+)?|\"[^\"]*\"|'[^']*'|==|!=|>=|<=|>|<|and|or
 
 COMPARISON_OPS = ("==", "!=", ">", ">=", "<", "<=")
 
+# What parse_comparison is allowed to consume as a binary operator. "and" / "or"
+# are deliberately absent: treating them as operators makes the parser fold
+# "x or y and z" left-to-right, so a rule that already matched on x still takes
+# the false branch. They belong to the level above.
+BINARY_OPS = COMPARISON_OPS + ("contains",)
+
 
 def _as_number(value):
     if isinstance(value, bool) or isinstance(value, (int, float)):
@@ -88,7 +94,7 @@ def _safe_eval_condition(expr: str, context: dict):
     def parse_comparison(pos):
         left = resolve(tokens[pos])
         pos += 1
-        if pos < len(tokens) and tokens[pos] in SAFE_OPS:
+        if pos < len(tokens) and tokens[pos] in BINARY_OPS:
             op_name = tokens[pos]
             right = resolve(tokens[pos + 1])
             left, right = _align_numeric(op_name, left, right)
@@ -218,20 +224,24 @@ async def _exec_loop(node: dict, context: dict) -> dict:
     semaphore = asyncio.Semaphore(3)
     loop = asyncio.get_running_loop()
 
-    async def run_one(index: int, item: str) -> str:
+    async def run_one(index: int, item: str):
         item_context = dict(context)
         item_context["item"] = item
         item_context["index"] = index + 1
         prompt = _replace_vars(template, item_context)
         async with semaphore:
             try:
-                return await loop.run_in_executor(None, call_llm, prompt, model, temperature)
+                return await loop.run_in_executor(None, call_llm, prompt, model, temperature), True
             except Exception as e:
                 logger.warning("Loop item failed: node_id=%s index=%s error=%s", node.get("id"), index, e)
-                return f"[第 {index + 1} 项执行失败: {e}]"
+                return f"[第 {index + 1} 项执行失败: {e}]", False
 
-    results = await asyncio.gather(*(run_one(i, it) for i, it in enumerate(items)))
-    failures = [r for r in results if r.startswith("[第")]
+    # Carried as a flag, not sniffed from the text: an answer that legitimately
+    # starts with 「[第」 used to be counted as a failure, and if every item read
+    # that way the whole node was reported as errored.
+    outcomes = await asyncio.gather(*(run_one(i, it) for i, it in enumerate(items)))
+    results = [text for text, _ in outcomes]
+    failures = [text for text, ok in outcomes if not ok]
     if len(failures) == len(items):
         raise RuntimeError(f"循环 {len(items)} 项全部失败：{failures[0]}")
     return {"output": join.join(results), "note": f"{len(items)} 项" + (f"，{len(failures)} 项失败" if failures else "")}
@@ -299,17 +309,30 @@ def _as_headers(headers) -> dict:
     return {}
 
 
+VAR_RE = re.compile(r"\{\{([^{}]+)\}\}")
+
+
 def _replace_vars(text: str, context: dict) -> str:
+    """Replace every placeholder in one pass over the original string.
+
+    Looping over the context and calling str.replace each time lets a value that
+    itself contains a placeholder be substituted again, so an upstream node whose
+    output happens to be "{{input}}" — a model echoing a template, a JSON body —
+    would inject another node's data, and the result would depend on dict order.
+    """
     if not isinstance(text, str):
         return text
-    for key, value in context.items():
-        placeholder = "{{" + key + "}}"
+
+    def render(match):
+        key = match.group(1)
+        if key not in context:
+            return match.group(0)
+        value = context[key]
         if isinstance(value, (dict, list)):
             value = json.dumps(value, ensure_ascii=False)
-        else:
-            value = str(value)
-        text = text.replace(placeholder, value)
-    return text
+        return str(value)
+
+    return VAR_RE.sub(render, text)
 
 
 REQUIRED_CONFIG = {

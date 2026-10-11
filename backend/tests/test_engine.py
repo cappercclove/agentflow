@@ -1,5 +1,6 @@
 from workflow_engine import (
     _as_list,
+    _exec_loop,
     _replace_vars,
     _safe_eval_condition,
     execute_node,
@@ -34,6 +35,20 @@ class TestSafeEval:
     def test_logical_or(self):
         assert _safe_eval_condition("x > 10 or y < 5", {"x": 1, "y": 3}) is True
         assert _safe_eval_condition("x > 10 or y < 5", {"x": 1, "y": 8}) is False
+
+    def test_or_is_the_looser_operator(self):
+        # Reads as "命中 x，或者 y 且 z 同时成立". x alone decides it, so a rule that
+        # matched on x must still take the true branch.
+        assert _safe_eval_condition("x or y and z", {"x": "yes", "y": "", "z": ""}) is True
+        assert _safe_eval_condition("x or y and z", {"x": "", "y": "yes", "z": ""}) is False
+
+    def test_and_binds_tighter_than_or(self):
+        assert _safe_eval_condition("x and y or z", {"x": "yes", "y": "", "z": "yes"}) is True
+        assert _safe_eval_condition("x and y or z", {"x": "yes", "y": "", "z": ""}) is False
+
+    def test_contains_binds_tighter_than_or(self):
+        assert _safe_eval_condition('a contains "x" or b', {"a": "example", "b": ""}) is True
+        assert _safe_eval_condition('a contains "x" or b', {"a": "sample", "b": ""}) is False
 
     def test_empty_expr(self):
         assert _safe_eval_condition("", {}) is False
@@ -128,6 +143,15 @@ class TestReplaceVars:
 
     def test_non_string_input(self):
         assert _replace_vars(123, {}) == 123
+
+    def test_substituted_text_is_not_scanned_again(self):
+        # An upstream node that echoes a template must not pull in a value that
+        # belongs to a different node, and the result cannot depend on dict order.
+        assert _replace_vars("{{p}}", {"p": "{{q}}", "q": "LEAKED"}) == "{{q}}"
+        assert _replace_vars("{{p}}", {"q": "LEAKED", "p": "{{q}}"}) == "{{q}}"
+
+    def test_unknown_placeholder_stays(self):
+        assert _replace_vars("{{missing}} tail", {"other": "x"}) == "{{missing}} tail"
 
 
 class TestExecuteNode:
@@ -352,6 +376,22 @@ class TestLoopNode:
         result = await execute_node(node, {"input": "a\nb"})
         assert result["status"] == "error"
         assert "全部失败" in result["output"]
+
+    async def test_an_answer_that_opens_like_a_failure_is_not_one(self, monkeypatch):
+        import workflow_engine
+
+        monkeypatch.setattr(
+            workflow_engine, "call_llm",
+            lambda prompt, model, temperature: "[第 1 项] 是正确答案",
+        )
+        node = {
+            "id": "l6",
+            "type": "loop",
+            "config": {"source": "{{input}}", "separator": "\n", "prompt": "x {{item}}"},
+        }
+        result = await _exec_loop(node, {"input": "a\nb"})
+        assert "1 项失败" not in result["note"]
+        assert result["output"] == "[第 1 项] 是正确答案\n\n[第 1 项] 是正确答案"
 
 
 class TestValidateWorkflow:
