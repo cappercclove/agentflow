@@ -35,11 +35,41 @@ const ICONS = {
   plus: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>',
 };
 
+// A page that cannot load used to leave the middle of the app blank with nothing to
+// say why — which reads as a broken install rather than a backend that is still
+// starting up (the normal state for a few seconds under Electron).
+async function fetchJson(url) {
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new Error('后端没有响应，可能还在启动');
+  }
+  if (!res.ok) throw new Error(`后端返回 ${res.status}`);
+  try {
+    return await res.json();
+  } catch (e) {
+    throw new Error('后端返回的不是 JSON');
+  }
+}
+
+function renderLoadError(container, err) {
+  container.innerHTML = `
+    <div class="empty-state">
+      <div class="empty-icon">${ICONS.executions}</div>
+      <h3 class="empty-title">这一页没有加载出来</h3>
+      <p>${escapeHtml(err && err.message ? err.message : '请求失败')}。确认后端服务在运行，然后重试。</p>
+      <p style="margin-top: 16px;"><button class="btn btn-primary" onclick="renderPage()">重试</button></p>
+    </div>
+  `;
+}
+
 function navigateTo(page) {
   currentPage = page;
   if (page !== 'execution-detail') stopLive();
   document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
-  document.querySelector(`[data-page="${page}"]`).classList.add('active');
+  const navItem = document.querySelector(`[data-page="${page}"]`);
+  if (navItem) navItem.classList.add('active');
 
   const titles = {
     dashboard: '仪表盘',
@@ -56,33 +86,44 @@ function navigateTo(page) {
   renderPage();
 }
 
+// Every page fetches before it paints, so two clicks in a row let the older, slower
+// response land last and replace the page the user is already looking at. A render
+// owns the content area only until the next one starts.
+let renderToken = 0;
+
 async function renderPage() {
+  const token = ++renderToken;
   const content = document.getElementById('content-area');
 
-  switch (currentPage) {
-    case 'dashboard':
-      await renderDashboard(content);
-      break;
-    case 'workflows':
-      await renderWorkflows(content);
-      break;
-    case 'editor':
-      renderEditor(content);
-      break;
-    case 'templates':
-      renderTemplates(content);
-      break;
-    case 'executions':
-      await renderExecutions(content);
-      break;
+  try {
+    switch (currentPage) {
+      case 'dashboard':
+        await renderDashboard(content, token);
+        break;
+      case 'workflows':
+        await renderWorkflows(content, token);
+        break;
+      case 'editor':
+        renderEditor(content);
+        break;
+      case 'templates':
+        renderTemplates(content);
+        break;
+      case 'executions':
+        await renderExecutions(content, token);
+        break;
+    }
+  } catch (e) {
+    if (token === renderToken) renderLoadError(content, e);
+    return;
   }
 
-  await updateStats();
+  if (token === renderToken) await updateStats();
 }
 
-async function renderDashboard(container) {
-  const res = await fetch(`${API}/api/stats`);
-  const stats = await res.json();
+async function renderDashboard(container, token) {
+  const stats = await fetchJson(`${API}/api/stats`);
+  if (token !== renderToken) return;
 
   const recentWf = stats.recent_workflows || [];
   const recentExec = stats.recent_executions || [];
@@ -201,9 +242,10 @@ async function renderDashboard(container) {
   `;
 }
 
-async function renderWorkflows(container) {
-  const res = await fetch(`${API}/api/workflows`);
-  workflows = await res.json();
+async function renderWorkflows(container, token) {
+  const data = await fetchJson(`${API}/api/workflows`);
+  if (token !== renderToken) return;
+  workflows = data;
 
   if (workflows.length === 0) {
     container.innerHTML = `
@@ -297,14 +339,17 @@ function renderEditor(container) {
   initEditor();
 }
 
-async function renderExecutions(container) {
-  const res = await fetch(`${API}/api/executions`);
-  const executions = await res.json();
+async function renderExecutions(container, token) {
+  const executions = await fetchJson(`${API}/api/executions`);
 
   if (!workflows.length) {
-    const wfRes = await fetch(`${API}/api/workflows`);
-    if (wfRes.ok) workflows = await wfRes.json();
+    try {
+      workflows = await fetchJson(`${API}/api/workflows`);
+    } catch (e) {
+      // Names fall back to 工作流 #id below; the record list itself still renders.
+    }
   }
+  if (token !== renderToken) return;
 
   if (executions.length === 0) {
     container.innerHTML = `
@@ -586,21 +631,24 @@ async function clearExecutions() {
 }
 
 async function viewExecution(id) {
-  const res = await fetch(`${API}/api/executions/${id}`);
-  if (!res.ok) return;
-  const exec = await res.json();
+  const token = renderToken;
+  let exec;
+  try {
+    exec = await fetchJson(`${API}/api/executions/${id}`);
+  } catch (e) {
+    if (token === renderToken) showToast(`这条记录没加载出来：${e.message}`, 'error');
+    return;
+  }
 
   const nodeTitles = {};
   let wfName = '';
   try {
-    const wfRes = await fetch(`${API}/api/workflows/${exec.workflow_id}`);
-    if (wfRes.ok) {
-      const wf = await wfRes.json();
-      wfName = wf.name || '';
-      (wf.nodes || []).forEach(n => { nodeTitles[n.id] = n.title || n.type; });
-    }
+    const wf = await fetchJson(`${API}/api/workflows/${exec.workflow_id}`);
+    wfName = wf.name || '';
+    (wf.nodes || []).forEach(n => { nodeTitles[n.id] = n.title || n.type; });
   } catch (e) {}
 
+  if (token !== renderToken) return;
   showExecutionDetail(exec, nodeTitles, wfName);
 }
 
@@ -945,8 +993,7 @@ function showToast(message, type = 'success') {
 
 async function updateStats() {
   try {
-    const res = await fetch(`${API}/api/stats`);
-    const stats = await res.json();
+    const stats = await fetchJson(`${API}/api/stats`);
     document.getElementById('stat-workflows').textContent = stats.workflows || 0;
     document.getElementById('stat-executions').textContent = stats.executions || 0;
   } catch (e) {}

@@ -137,7 +137,13 @@ async def serve_service_worker():
     return Response(
         content=content,
         media_type="application/javascript",
-        headers={"Service-Worker-Allowed": "/"},
+        # Without a validator or revalidation directive the browser serves an
+        # HTTP-cached worker, and a bumped CACHE_NAME never reaches anyone: every
+        # later frontend fix would silently fail to ship.
+        headers={
+            "Service-Worker-Allowed": "/",
+            "Cache-Control": "no-cache",
+        },
     )
 
 

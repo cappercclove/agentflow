@@ -399,3 +399,12 @@ async def test_unexpected_crash_still_tells_the_client_it_ended(client, monkeypa
     assert "数据库写入失败" in finished.json()["output_data"]["error"]
     # Without the frame the detail page would sit at 运行中 forever.
     assert sent == ["error"]
+
+
+async def test_service_worker_script_must_be_revalidated(client):
+    # An HTTP-cached worker means a bumped CACHE_NAME never reaches the browser, so
+    # every later frontend fix silently fails to ship.
+    res = await client.get("/sw.js")
+    assert res.status_code == 200
+    assert "no-cache" in res.headers["cache-control"]
+    assert "CACHE_NAME" in res.text
