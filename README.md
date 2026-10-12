@@ -154,6 +154,8 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 python -m pytest -q
 ```
 
+第一次用这个平台？读 [使用手册](docs/使用手册.md)：界面地图、七类节点的字段、变量与条件写法、导入导出格式，以及一条 15 分钟上手路线。
+
 #### Docker 部署
 
 ```bash
@@ -324,6 +326,7 @@ agentflow/
 ├── package.json                # Electron 打包配置
 ├── docs/
 │   ├── screenshots/            # 界面截图
+│   ├── 使用手册.md               # 按界面真实文案写的操作手册
 │   └── sample_workflow.json
 ├── Dockerfile
 ├── .dockerignore                # 挡住 backend/.env 与 *.db，不让密钥进镜像层
