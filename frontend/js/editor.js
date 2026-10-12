@@ -31,10 +31,16 @@ function scheduleSave() {
 }
 
 function queueSave(target, snapshot) {
+  // Callers that do not build one themselves still mean "the graph as it is right
+  // now", not "whatever is on the canvas when this save finally gets its turn".
+  const data = snapshot || {
+    nodes: JSON.parse(JSON.stringify(editorNodes)),
+    edges: JSON.parse(JSON.stringify(editorEdges)),
+  };
   // One save at a time, oldest first: two overlapping PUTs can land out of order
   // and leave the older graph as the stored one.
   saveChain = saveChain
-    .then(() => saveWorkflow(target, snapshot))
+    .then(() => saveWorkflow(target, data))
     .then(() => {
       saveBroken = false;
     })
@@ -66,30 +72,37 @@ function pushHistory() {
 }
 
 function undo() {
+  // Ctrl+Z on another page used to run through with a stale stack: it fired a save of
+  // the editor's graph and then threw on the property panel that was not there.
+  if (currentPage !== 'editor') return;
   if (historyIndex <= 0) return;
   historyIndex--;
-  const state = history[historyIndex];
-  editorNodes = JSON.parse(JSON.stringify(state.nodes));
-  editorEdges = JSON.parse(JSON.stringify(state.edges));
-  selectedNode = null;
-  renderCanvas();
-  queueSave(currentWorkflow);
-  document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
+  restoreHistory();
 }
 
 function redo() {
+  if (currentPage !== 'editor') return;
   if (historyIndex >= history.length - 1) return;
   historyIndex++;
+  restoreHistory();
+}
+
+function restoreHistory() {
   const state = history[historyIndex];
   editorNodes = JSON.parse(JSON.stringify(state.nodes));
   editorEdges = JSON.parse(JSON.stringify(state.edges));
   selectedNode = null;
+  connectingPort = null;
   renderCanvas();
   queueSave(currentWorkflow);
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
 }
 
 document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    cancelConnection();
+    return;
+  }
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.tagName === 'SELECT') return;
   if ((e.ctrlKey || e.metaKey) && e.key === 'z') {
     e.preventDefault();
@@ -101,9 +114,28 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// A connection is armed by the first port and fired by the second. Without this the
+// arming survived a released drag, so the next click on any port completed a line the
+// user meant to start instead — and the highlighted port kept looking selectable.
+function cancelConnection() {
+  if (!connectingPort) return;
+  connectingPort = null;
+  document.querySelectorAll('.node-port.connecting').forEach(p => p.classList.remove('connecting'));
+}
+
 async function initEditor() {
-  const res = await fetch(`${API}/api/node-types`);
-  nodeTypes = await res.json();
+  // The undo stack belongs to the graph that was open, not to the editor. Left over
+  // from the previous workflow, one Ctrl+Z pasted that graph onto this one and the
+  // autosave quietly wrote it to the server.
+  history = [];
+  historyIndex = -1;
+  selectedNode = null;
+  connectingPort = null;
+  draggingNode = null;
+  // A pending debounce is deliberately left running: it carries its own target and
+  // graph, so cancelling it here would drop the last keystroke before a switch.
+
+  nodeTypes = await fetchJson(`${API}/api/node-types`);
   renderPalette();
 
   if (currentWorkflow) {
@@ -183,7 +215,7 @@ function createNodeElement(node) {
     </div>
     ${configHint ? `<div class="node-body">${configHint}</div>` : ''}
     <div class="node-ports">
-      ${hasInput ? '<div class="port-group"><div class="port-slot"><div class="node-port" data-node="' + node.id + '" data-kind="input" data-port="input"></div></div></div>' : '<div></div>'}
+      ${hasInput ? '<div class="port-group"><div class="port-slot"><div class="node-port" data-node="' + escapeAttr(node.id) + '" data-kind="input" data-port="input"></div></div></div>' : '<div></div>'}
       ${outPorts ? `<div class="port-group">${outPorts}</div>` : '<div></div>'}
     </div>
   `;
@@ -221,8 +253,11 @@ function createNodeElement(node) {
           edge => edge.source === source && edge.target === target && (edge.sourcePort || 'output') === sourcePort
         );
         if (!exists) {
-          pushHistory();
           editorEdges.push({ source, target, sourcePort });
+          // Recorded after the change, like every other edit: a step that stores the
+          // state before it is a state the canvas is never actually in, so redo had
+          // nothing to land on.
+          pushHistory();
           renderCanvas();
           queueSave(currentWorkflow);
         }
@@ -285,8 +320,8 @@ function renderEdges(svg) {
     pathEl.dataset.index = i;
 
     pathEl.addEventListener('click', () => {
-      pushHistory();
       editorEdges.splice(i, 1);
+      pushHistory();
       renderCanvas();
       queueSave(currentWorkflow);
       showToast('已删除连线', 'success');
@@ -364,12 +399,18 @@ document.addEventListener('mousemove', (e) => {
   renderEdges(document.getElementById('svg-layer'));
 });
 
-document.addEventListener('mouseup', () => {
+document.addEventListener('mouseup', (e) => {
   if (draggingNode) {
     pushHistory();
     queueSave(currentWorkflow);
   }
   draggingNode = null;
+  // Released somewhere that is not a port means the drag did not complete, so the
+  // arming is dropped. Releasing over a port keeps it, which is what lets a click on
+  // the source port followed by a click on the target still connect the two.
+  const hit = e.target;
+  const onPort = hit && hit.classList && hit.classList.contains('node-port');
+  if (connectingPort && !onPort) cancelConnection();
 });
 
 function selectNode(nodeId) {
@@ -569,31 +610,34 @@ function updateNodeJson(nodeId, key, raw) {
 }
 
 function deleteNode(nodeId) {
-  pushHistory();
   editorNodes = editorNodes.filter(n => n.id !== nodeId);
   editorEdges = editorEdges.filter(e => e.source !== nodeId && e.target !== nodeId);
   selectedNode = null;
+  // Its ports disappear with it, and a connection armed to one of them would now
+  // create a line out of a node id that no longer exists.
+  if (connectingPort && connectingPort.nodeId === nodeId) cancelConnection();
+  pushHistory();
   renderCanvas();
   queueSave(currentWorkflow);
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
 }
 
 async function checkWorkflow() {
-  const res = await fetch(`${API}/api/workflows/validate`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nodes: editorNodes, edges: editorEdges }),
-  });
-  if (!res.ok) {
-    showToast('检查失败，请重试', 'error');
+  let data;
+  try {
+    data = await requestJson(`${API}/api/workflows/validate`, {
+      method: 'POST',
+      body: JSON.stringify({ nodes: editorNodes, edges: editorEdges }),
+    });
+  } catch (e) {
+    showToast(e.message, 'error');
     return false;
   }
-  const data = await res.json();
   if (data.valid) {
     showToast('检查通过，可以直接运行', 'success');
     return true;
   }
-  showToast(data.problems.join('；'), 'error');
+  showToast((data.problems || []).join('；'), 'error');
   return false;
 }
 
@@ -615,37 +659,32 @@ async function runWorkflow() {
   openRunModal(currentWorkflow.id, currentWorkflow.name);
 }
 
-async function saveWorkflow(target = currentWorkflow, snapshot) {
+async function saveWorkflow(target = currentWorkflow, data) {
   if (!target) return;
 
-  const data = snapshot || {
-    nodes: editorNodes,
-    edges: editorEdges,
+  const graph = data || {
+    nodes: JSON.parse(JSON.stringify(editorNodes)),
+    edges: JSON.parse(JSON.stringify(editorEdges)),
   };
 
-  let res;
   if (target.id) {
-    res = await fetch(`${API}/api/workflows/${target.id}`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(data),
-    });
-    if (!res.ok) {
-      throw new Error(res.status === 404 ? '这份工作流已被删除' : `服务端返回 ${res.status}`);
+    try {
+      await requestJson(`${API}/api/workflows/${target.id}`, { method: 'PUT', body: JSON.stringify(graph) });
+    } catch (e) {
+      throw new Error(e.status === 404 ? '这份工作流已被删除' : e.message);
     }
-  } else {
-    res = await fetch(`${API}/api/workflows`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: target.name || '未命名工作流',
-        description: target.description || '',
-        nodes: editorNodes,
-        edges: editorEdges,
-      }),
-    });
-    if (!res.ok) throw new Error(`服务端返回 ${res.status}`);
-    const wf = await res.json();
-    target.id = wf.id;
+    return;
   }
+
+  // A brand new workflow has nothing stored yet, so the canvas goes with the name.
+  const wf = await requestJson(`${API}/api/workflows`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: target.name || '未命名工作流',
+      description: target.description || '',
+      nodes: graph.nodes,
+      edges: graph.edges,
+    }),
+  });
+  target.id = wf.id;
 }

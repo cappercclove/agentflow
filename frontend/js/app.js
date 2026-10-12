@@ -64,6 +64,33 @@ function renderLoadError(container, err) {
   `;
 }
 
+// Carries the status so a caller can single one code out (404 on a save means the
+// workflow was deleted somewhere else) without parsing the Chinese message.
+class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// The action buttons all had their own `if (!res.ok)` branch and none of them caught a
+// rejected fetch, so a backend that was still starting up made the button do nothing
+// at all — and one left the 分解 button disabled forever.
+async function requestJson(url, options = {}) {
+  let res;
+  try {
+    res = await fetch(url, {
+      ...options,
+      headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    });
+  } catch (e) {
+    throw new ApiError('后端没有响应，可能还在启动', 0);
+  }
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(body.detail || `服务端返回 ${res.status}`, res.status);
+  return body;
+}
+
 function navigateTo(page) {
   currentPage = page;
   if (page !== 'execution-detail') stopLive();
@@ -104,7 +131,7 @@ async function renderPage() {
         await renderWorkflows(content, token);
         break;
       case 'editor':
-        renderEditor(content);
+        await renderEditor(content);
         break;
       case 'templates':
         renderTemplates(content);
@@ -336,7 +363,9 @@ function renderEditor(container) {
     </div>
   `;
 
-  initEditor();
+  // Awaited, so a node-type list that fails to load lands on the error card instead
+  // of an editor with an empty palette and no explanation.
+  return initEditor();
 }
 
 async function renderExecutions(container, token) {
@@ -407,6 +436,7 @@ function showCreateModal() {
   document.getElementById('new-workflow-name').value = '';
   document.getElementById('new-workflow-desc').value = '';
   showModal('create-modal');
+  setTimeout(() => document.getElementById('new-workflow-name').focus(), 60);
 }
 
 async function createWorkflow() {
@@ -418,39 +448,45 @@ async function createWorkflow() {
     return;
   }
 
-  const res = await fetch(`${API}/api/workflows`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, description, nodes: [], edges: [] }),
-  });
-
-  if (res.ok) {
-    const data = await res.json();
-    closeModal('create-modal');
-    showToast('工作流创建成功', 'success');
-    currentWorkflow = { id: data.id, name, description, nodes: [], edges: [] };
-    navigateTo('editor');
-  } else {
-    showToast('创建失败，请重试', 'error');
+  let data;
+  try {
+    data = await requestJson(`${API}/api/workflows`, {
+      method: 'POST',
+      body: JSON.stringify({ name, description, nodes: [], edges: [] }),
+    });
+  } catch (e) {
+    showToast(e.message, 'error');
+    return;
   }
+
+  closeModal('create-modal');
+  showToast('工作流创建成功', 'success');
+  currentWorkflow = { id: data.id, name, description, nodes: [], edges: [] };
+  navigateTo('editor');
 }
 
 async function openWorkflow(id) {
-  const res = await fetch(`${API}/api/workflows/${id}`);
-  if (res.ok) {
-    currentWorkflow = await res.json();
-    navigateTo('editor');
+  try {
+    currentWorkflow = await requestJson(`${API}/api/workflows/${id}`);
+  } catch (e) {
+    showToast(`这份工作流打不开：${e.message}`, 'error');
+    return;
   }
+  navigateTo('editor');
 }
 
 async function deleteWorkflow(id) {
   if (!confirm('确定要删除这个工作流吗？')) return;
 
-  const res = await fetch(`${API}/api/workflows/${id}`, { method: 'DELETE' });
-  if (res.ok) {
-    showToast('已删除', 'success');
-    renderPage();
+  try {
+    await requestJson(`${API}/api/workflows/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    showToast(e.message, 'error');
+    return;
   }
+  showToast('已删除', 'success');
+  if (currentWorkflow && currentWorkflow.id === id) currentWorkflow = null;
+  renderPage();
 }
 
 async function executeWorkflow(id) {
@@ -516,24 +552,22 @@ async function importWorkflowFile(input) {
     return;
   }
 
-  const res = await fetch(`${API}/api/workflows/import`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: data.name || file.name.replace(/\.json$/i, ''),
-      description: data.description || '',
-      nodes: Array.isArray(data.nodes) ? data.nodes : [],
-      edges: Array.isArray(data.edges) ? data.edges : [],
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    showToast(body.detail || '导入失败', 'error');
+  let imported;
+  try {
+    imported = await requestJson(`${API}/api/workflows/import`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: data.name || file.name.replace(/\.json$/i, ''),
+        description: data.description || '',
+        nodes: Array.isArray(data.nodes) ? data.nodes : [],
+        edges: Array.isArray(data.edges) ? data.edges : [],
+      }),
+    });
+  } catch (e) {
+    showToast(e.message, 'error');
     return;
   }
 
-  const imported = await res.json();
   showToast(`已导入「${imported.name}」，${imported.node_count} 个节点`, 'success');
   renderPage();
 }
@@ -548,45 +582,44 @@ function openRunModal(workflowId, name) {
   setTimeout(() => document.getElementById('run-input').focus(), 60);
 }
 
-async function confirmRun() {
-  const input = document.getElementById('run-input').value;
-  const res = await fetch(`${API}/api/workflows/${pendingRun.workflowId}/execute`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ input: { input } }),
-  });
+let runSubmitting = false;
 
-  if (res.ok) {
-    const data = await res.json();
+async function confirmRun() {
+  // Two clicks before the response lands used to start two runs, and each one costs
+  // model calls.
+  if (runSubmitting) return;
+  runSubmitting = true;
+  const input = document.getElementById('run-input').value;
+  try {
+    const data = await requestJson(`${API}/api/workflows/${pendingRun.workflowId}/execute`, {
+      method: 'POST',
+      body: JSON.stringify({ input: { input } }),
+    });
     closeModal('run-modal');
     showToast(`已开始执行 #${data.execution_id}`, 'success');
     viewExecution(data.execution_id);
-    return;
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    runSubmitting = false;
   }
-
-  let detail = '执行失败，请重试';
-  try {
-    const body = await res.json();
-    if (body.detail) detail = body.detail;
-  } catch (e) {}
-  showToast(detail, 'error');
 }
 
 async function waitUntilSettled(id) {
   for (let i = 0; i < 20; i++) {
-    const res = await fetch(`${API}/api/executions/${id}`);
-    if (!res.ok) return;
-    const exec = await res.json();
-    if (isFinished(exec.status)) return;
+    const res = await fetch(`${API}/api/executions/${id}`).catch(() => null);
+    if (!res || !res.ok) return;
+    const exec = await res.json().catch(() => null);
+    if (!exec || isFinished(exec.status)) return;
     await new Promise(r => setTimeout(r, 500));
   }
 }
 
 async function cancelExecution(id) {
-  const res = await fetch(`${API}/api/executions/${id}/cancel`, { method: 'POST' });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    showToast(body.detail || '停止失败，请重试', 'error');
+  try {
+    await requestJson(`${API}/api/executions/${id}/cancel`, { method: 'POST' });
+  } catch (e) {
+    showToast(e.message, 'error');
     return;
   }
   showToast('已请求停止运行', 'success');
@@ -604,34 +637,37 @@ async function cancelExecution(id) {
 
 async function deleteExecution(id) {
   if (!confirm(`确定删除执行记录 #${id}？日志会一并删除。`)) return;
-  const res = await fetch(`${API}/api/executions/${id}`, { method: 'DELETE' });
-  if (res.ok) {
-    showToast('已删除', 'success');
-    if (currentPage === 'execution-detail') {
-      navigateTo('executions');
-    } else {
-      renderPage();
-    }
+  try {
+    await requestJson(`${API}/api/executions/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    showToast(e.message, 'error');
     return;
   }
-  const body = await res.json().catch(() => ({}));
-  showToast(body.detail || '删除失败', 'error');
+  showToast('已删除', 'success');
+  if (currentPage === 'execution-detail') {
+    navigateTo('executions');
+  } else {
+    renderPage();
+  }
 }
 
 async function clearExecutions() {
   if (!confirm('清空所有已完成的执行记录？运行中的不受影响。')) return;
-  const res = await fetch(`${API}/api/executions`, { method: 'DELETE' });
-  if (res.ok) {
-    const data = await res.json();
-    showToast(`已清空 ${data.deleted} 条记录`, 'success');
-    renderPage();
+  let data;
+  try {
+    data = await requestJson(`${API}/api/executions`, { method: 'DELETE' });
+  } catch (e) {
+    showToast(e.message, 'error');
     return;
   }
-  showToast('清空失败，请重试', 'error');
+  showToast(`已清空 ${data.deleted} 条记录`, 'success');
+  renderPage();
 }
 
 async function viewExecution(id) {
-  const token = renderToken;
+  // Claim the content area: without the bump, a page render that was already in
+  // flight could land after this one and paint over the details.
+  const token = ++renderToken;
   let exec;
   try {
     exec = await fetchJson(`${API}/api/executions/${id}`);
@@ -654,11 +690,16 @@ async function viewExecution(id) {
 
 let liveSocket = null;
 let livePoller = null;
+// stopLive clears the interval, but a fetch already in flight keeps going and used to
+// navigate whoever had since moved on back to the execution page.
+let liveGeneration = 0;
 
 function stopLive() {
+  liveGeneration++;
   if (liveSocket) {
     liveSocket.onmessage = null;
     liveSocket.onerror = null;
+    liveSocket.onclose = null;
     try { liveSocket.close(); } catch (e) {}
     liveSocket = null;
   }
@@ -676,12 +717,14 @@ function watchExecution(exec) {
   stopLive();
   if (isFinished(exec.status)) return;
 
+  const generation = liveGeneration;
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   let sock;
   try {
     sock = new WebSocket(`${proto}//${location.host}/ws/execute/${exec.id}`);
     liveSocket = sock;
     sock.onmessage = (event) => {
+      if (generation !== liveGeneration) return;
       const msg = JSON.parse(event.data);
       if (msg.type === 'snapshot') {
         // Everything that already happened, as one replace rather than a replay
@@ -694,7 +737,9 @@ function watchExecution(exec) {
         viewExecution(exec.id);
       }
     };
-    sock.onerror = () => pollExecution(exec.id);
+    sock.onerror = () => {
+      if (generation === liveGeneration) pollExecution(exec.id);
+    };
     // A close with no 'complete' frame means the backend went away mid-run, so the
     // record still needs a fallback that notices it stopped.
     sock.onclose = () => {
@@ -710,8 +755,15 @@ function watchExecution(exec) {
 
 function pollExecution(execId) {
   if (livePoller) return;
+  const generation = liveGeneration;
   livePoller = setInterval(async () => {
-    const res = await fetch(`${API}/api/executions/${execId}`);
+    let res;
+    try {
+      res = await fetch(`${API}/api/executions/${execId}`);
+    } catch (e) {
+      return;
+    }
+    if (generation !== liveGeneration) return;
     if (res.status === 404) {
       stopLive();
       showToast('这条执行记录已被删除', 'error');
@@ -719,7 +771,8 @@ function pollExecution(execId) {
       return;
     }
     if (!res.ok) return;
-    const exec = await res.json();
+    const exec = await res.json().catch(() => null);
+    if (generation !== liveGeneration || !exec) return;
     if (isFinished(exec.status)) {
       stopLive();
       viewExecution(execId);
@@ -827,27 +880,30 @@ function showExecutionDetail(exec, nodeTitles = {}, wfName = '') {
   watchExecution(exec);
 }
 
+let decomposeBusy = false;
+
 async function quickDecompose() {
   const input = document.getElementById('quick-decompose');
   const task = input.value.trim();
-  if (!task) return;
+  if (!task || decomposeBusy) return;
 
-  input.value = '';
+  decomposeBusy = true;
   showToast('AI 正在分解任务...', 'info');
-
-  const res = await fetch(`${API}/api/decompose`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task }),
-  });
-
-  if (res.ok) {
-    const data = await res.json();
+  try {
+    const data = await requestJson(`${API}/api/decompose`, {
+      method: 'POST',
+      body: JSON.stringify({ task }),
+    });
     decomposeSteps = data.steps;
+    // Cleared only once it worked: on a failure the text stays so a retry is one
+    // click away.
+    input.value = '';
     buildWorkflowFromDecompose(data.steps);
     showToast(`已分解为 ${data.steps.length} 个步骤`, 'success');
-  } else {
-    showToast('分解失败，请重试', 'error');
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    decomposeBusy = false;
   }
 }
 
@@ -862,21 +918,20 @@ async function runDecompose() {
   btn.textContent = '分解中...';
   btn.disabled = true;
 
-  const res = await fetch(`${API}/api/decompose`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ task }),
-  });
-
-  btn.textContent = '开始分解';
-  btn.disabled = false;
-
-  if (res.ok) {
-    const data = await res.json();
+  try {
+    const data = await requestJson(`${API}/api/decompose`, {
+      method: 'POST',
+      body: JSON.stringify({ task }),
+    });
     decomposeSteps = data.steps;
     renderDecomposeResult(data.steps);
-  } else {
-    showToast('分解失败，请重试', 'error');
+  } catch (e) {
+    showToast(e.message, 'error');
+  } finally {
+    // A rejected fetch used to leave this button saying 分解中 forever, and the modal
+    // was only reusable by closing it.
+    btn.textContent = '开始分解';
+    btn.disabled = false;
   }
 }
 
@@ -982,6 +1037,39 @@ function closeModal(id) {
   document.getElementById(id).classList.remove('active');
 }
 
+const MODAL_IDS = ['create-modal', 'decompose-modal', 'run-modal'];
+
+function activeModal() {
+  for (const id of MODAL_IDS) {
+    const el = document.getElementById(id);
+    if (el && el.classList.contains('active')) return el;
+  }
+  return null;
+}
+
+// These cards could only be dismissed by their own buttons: Escape did nothing, a
+// click outside fell through onto the page behind, and the 新建 card did not even put
+// the cursor in the name field.
+document.addEventListener('keydown', (e) => {
+  const modal = activeModal();
+  if (!modal) return;
+  if (e.key === 'Escape') {
+    closeModal(modal.id);
+    return;
+  }
+  // The 名称 field is a single-line input, so Enter means 创建 there. The other
+  // bodies are textareas, where Enter is a newline the user is typing.
+  if (e.key === 'Enter' && modal.id === 'create-modal' && e.target.tagName === 'INPUT') {
+    e.preventDefault();
+    createWorkflow();
+  }
+});
+
+document.addEventListener('click', (e) => {
+  const modal = activeModal();
+  if (modal && e.target === modal) closeModal(modal.id);
+});
+
 function showToast(message, type = 'success') {
   const container = document.getElementById('toast-container');
   const toast = document.createElement('div');
@@ -1000,7 +1088,9 @@ async function updateStats() {
 }
 
 function escapeHtml(text) {
-  if (!text) return '';
+  // 0 and false are values here, not absences — a temperature of 0 rendered as an
+  // empty label.
+  if (text === null || text === undefined) return '';
   const div = document.createElement('div');
   div.textContent = typeof text === 'string' ? text : JSON.stringify(text, null, 2);
   return div.innerHTML;
