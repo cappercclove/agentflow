@@ -52,9 +52,35 @@ LOGIN_REQUIRED = "会话已过期，请重新输入访问口令"
 PUBLIC_PATHS = {"/api/login", "/login", "/health"}
 
 
+def _reconcile_orphan_executions():
+    """Close out runs the previous process left mid-flight.
+
+    A run's task lives only in memory, so after a restart or a deploy its row keeps the
+    status it died with: the list says 运行中 forever, 停止 answers 已停止, and 清空 only
+    deletes finished rows, so the record can never be removed.
+    """
+    db = SessionLocal()
+    try:
+        orphans = db.query(Execution).filter(Execution.status.notin_(FINISHED_STATUSES)).all()
+        for execution in orphans:
+            _append_log(execution, "error", "服务重启，这次执行被中断")
+            execution.status = "error"
+            execution.output_data = execution.output_data or {"error": "服务重启，执行被中断"}
+            execution.finished_at = datetime.now(timezone.utc)
+        if orphans:
+            db.commit()
+            logger.info("Reconciled interrupted executions on startup: count=%s", len(orphans))
+    except Exception:
+        logger.exception("Could not reconcile interrupted executions on startup")
+        db.rollback()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
+    _reconcile_orphan_executions()
     if os.name == "posix":
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -121,6 +147,18 @@ def _throttle(request: Request, name: str):
     if not allowed:
         logger.warning("Rate limited: name=%s ip=%s", name, client_ip(request))
         return JSONResponse(status_code=429, content={"detail": deny_message(name, retry_after)})
+    return None
+
+
+def _consume_budget(request: Request):
+    """Charge the site-wide daily cap. Only the endpoints that can reach the model call
+    this, so a per-IP limit can never be sidestepped into an empty coupon."""
+    if not auth_enabled():
+        return None
+    within_budget, hard_max = DAILY_RUNS.consume()
+    if not within_budget:
+        logger.warning("Daily run budget exhausted: ip=%s", client_ip(request))
+        return JSONResponse(status_code=429, content={"detail": budget_message(hard_max)})
     return None
 
 
@@ -240,6 +278,12 @@ async def get_node_types():
 
 @app.post("/api/workflows")
 async def create_workflow(data: WorkflowCreate, db: Session = Depends(get_db)):
+    # Empty is legitimate here (the editor saves a blank canvas), but nothing
+    # structurally broken is. Import has enforced this all along; the create and
+    # update paths were the holes that let a phantom node into the database.
+    problems = validate_graph_shape(data.nodes, data.edges, allow_empty=True)
+    if problems:
+        raise HTTPException(status_code=400, detail="；".join(problems))
     workflow = Workflow(
         name=data.name,
         description=data.description,
@@ -291,6 +335,14 @@ async def update_workflow(workflow_id: int, data: WorkflowUpdate, db: Session = 
     workflow = db.query(Workflow).filter(Workflow.id == workflow_id).first()
     if not workflow:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    next_nodes = data.nodes if data.nodes is not None else (workflow.nodes or [])
+    next_edges = data.edges if data.edges is not None else (workflow.edges or [])
+    # A PUT is the autosave path, so this is the check that keeps a phantom node or a
+    # dangling edge out of the database — and out of the canvas, where it used to
+    # render as an empty box that no later save could get rid of.
+    problems = validate_graph_shape(next_nodes, next_edges, allow_empty=True)
+    if problems:
+        raise HTTPException(status_code=400, detail="；".join(problems))
     if data.name is not None:
         workflow.name = data.name
     if data.description is not None:
@@ -336,11 +388,9 @@ async def execute_workflow(workflow_id: int, data: ExecuteRequest, request: Requ
 
     # Charged after validation: a workflow that never starts should not eat the
     # day's budget either.
-    if auth_enabled():
-        within_budget, hard_max = DAILY_RUNS.consume()
-        if not within_budget:
-            logger.warning("Daily run budget exhausted: ip=%s", client_ip(request))
-            return JSONResponse(status_code=429, content={"detail": budget_message(hard_max)})
+    denied = _consume_budget(request)
+    if denied is not None:
+        return denied
 
     execution = Execution(
         workflow_id=workflow_id,
@@ -508,6 +558,9 @@ async def decompose(data: DecomposeRequest, request: Request):
     limited = _throttle(request, "decompose")
     if limited is not None:
         return limited
+    denied = _consume_budget(request)
+    if denied is not None:
+        return denied
     logger.info("Task decomposition requested: task=%s", data.task[:100])
     loop = asyncio.get_running_loop()
     try:
@@ -524,6 +577,15 @@ async def execute_single_node(data: NodeExecuteRequest, request: Request):
     limited = _throttle(request, "node")
     if limited is not None:
         return limited
+    problems = validate_graph_shape([data.node], [], allow_empty=True)
+    if problems:
+        raise HTTPException(status_code=400, detail="；".join(problems))
+    # A single-node test of an llm/loop node costs the same tokens as a run, so it
+    # draws from the same daily budget; without this the cap only protected /execute.
+    if data.node.get("type") in ("llm", "loop"):
+        denied = _consume_budget(request)
+        if denied is not None:
+            return denied
     result = await execute_node(data.node, data.context)
     return result
 

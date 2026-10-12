@@ -235,8 +235,56 @@ class TestExecuteNode:
     async def test_unknown_type(self):
         node = {"id": "u1", "type": "unknown", "config": {}}
         result = await execute_node(node, {})
-        assert result["status"] == "success"
+        assert result["status"] == "error"
         assert "未知" in result["output"]
+
+    async def test_node_that_is_not_an_object(self):
+        result = await execute_node("start", {})
+        assert result["status"] == "error"
+
+    async def test_text_config_that_is_not_an_object(self, monkeypatch):
+        # Used to raise AttributeError, which surfaced as a 500 on 检查 and 运行.
+        import workflow_engine
+
+        monkeypatch.setattr(workflow_engine, "call_llm", lambda prompt, model, temperature: "OK")
+        node = {"id": "l1", "type": "llm", "config": "prompt = hi"}
+        assert validate_workflow(
+            [{"id": "s", "type": "start"}, node, {"id": "e", "type": "end"}],
+            [{"source": "s", "target": "l1"}, {"source": "l1", "target": "e"}],
+        )
+        result = await execute_node(node, {})
+        assert result["status"] == "success"
+        assert result["output"] == "OK"
+
+    async def test_llm_prompt_that_is_not_a_string_is_rendered_as_json(self, monkeypatch):
+        import workflow_engine
+
+        seen = {}
+
+        def capture(prompt, model, temperature):
+            seen["prompt"] = prompt
+            return "OK"
+
+        monkeypatch.setattr(workflow_engine, "call_llm", capture)
+        await execute_node({"id": "l2", "type": "llm", "config": {"prompt": ["a", "b"]}}, {})
+        assert seen["prompt"] == '["a", "b"]'
+
+    async def test_llm_temperature_is_not_passed_through_broken(self, monkeypatch):
+        import workflow_engine
+
+        seen = {}
+
+        def capture(prompt, model, temperature):
+            seen["temperature"] = temperature
+            return "OK"
+
+        monkeypatch.setattr(workflow_engine, "call_llm", capture)
+        await execute_node({"id": "l3", "type": "llm", "config": {"prompt": "x", "temperature": "hot"}}, {})
+        assert seen["temperature"] == 0.7
+        await execute_node({"id": "l4", "type": "llm", "config": {"prompt": "x", "temperature": -5}}, {})
+        assert seen["temperature"] == 0
+        await execute_node({"id": "l5", "type": "llm", "config": {"prompt": "x", "temperature": 9}}, {})
+        assert seen["temperature"] == 2
 
     async def test_condition_exposes_branch(self):
         node = {"id": "c3", "type": "condition", "config": {"condition": "x > 5"}}
@@ -556,3 +604,131 @@ class TestMissingIdGuard:
         # this used to raise AttributeError instead of reporting a problem.
         assert validate_workflow(["start", 3], []) == ["第 1 个节点不是对象", "第 2 个节点不是对象"]
         assert validate_workflow([{"id": "a", "type": "start"}], ["x"]) == ["第 1 条连线不是对象"]
+
+
+class TestNodeGuards:
+    """Everything a hand-written or stale graph can put in a node field."""
+
+    async def test_text_node_treats_a_bare_string_as_one_item(self):
+        # Iterating a str used to feed one character at a time into the operation,
+        # so 「hello」 split into five pieces and a dict concatenated its keys.
+        result = await execute_node(
+            {"id": "t1", "type": "text", "config": {"operation": "split", "texts": "a,b,c", "separator": ","}},
+            {},
+        )
+        assert result["output"] == ["a", "b", "c"]
+
+    async def test_text_node_rejects_a_mapping_for_texts(self):
+        result = await execute_node(
+            {"id": "t2", "type": "text", "config": {"operation": "concat", "texts": {"a": "1", "b": "2"}}},
+            {},
+        )
+        assert result["status"] == "error"
+        assert "数组" in result["output"]
+
+    async def test_text_node_renders_non_string_items(self):
+        result = await execute_node(
+            {"id": "t3", "type": "text", "config": {"operation": "concat", "texts": [1, {"k": "v"}, None]}},
+            {},
+        )
+        assert result["output"] == '1{"k": "v"}'
+
+    async def test_node_must_be_an_object_to_run(self):
+        result = await execute_node("just a string", {})
+        assert result["status"] == "error"
+        assert "不是对象" in result["output"]
+
+    def test_shape_check_requires_a_dict_config(self):
+        problems = validate_graph_shape([{"id": "a", "type": "llm", "config": "oops"}], [])
+        assert any("config 不是对象" in p for p in problems)
+
+    def test_shape_check_requires_numeric_coordinates(self):
+        for bad in ["NaN", "100", None, [1]]:
+            problems = validate_graph_shape([{"id": "a", "type": "llm", "x": bad, "y": 1}], [])
+            assert any("坐标 x 不是数字" in p for p in problems), bad
+
+    def test_shape_check_accepts_a_missing_position(self):
+        assert validate_graph_shape([{"id": "a", "type": "llm"}], []) == []
+
+    def test_shape_check_allows_an_empty_canvas(self):
+        assert validate_graph_shape([], [], allow_empty=True) == []
+        assert validate_graph_shape([], []) == ["文件里没有节点"]
+
+    async def test_http_node_blocks_the_cloud_metadata_address(self, monkeypatch):
+        attempted = {}
+
+        class ExplodingClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                raise AssertionError("the request must never leave for a metadata address")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("workflow_engine.httpx.AsyncClient", ExplodingClient)
+        for url in ["http://169.254.169.254/latest/meta-data/", "http://100.100.100.200/latest/"]:
+            result = await execute_node({"id": "h", "type": "http", "config": {"url": url}}, {})
+            assert result["status"] == "error"
+            assert "元数据" in result["output"]
+        assert not attempted
+
+    async def test_http_node_caps_the_stored_response(self, monkeypatch):
+        import workflow_engine
+
+        class BigResponse:
+            status_code = 200
+            text = "x" * (workflow_engine.MAX_HTTP_OUTPUT_CHARS + 5000)
+            is_error = False
+
+        class BigClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def request(self, method, url, headers=None, content=None):
+                return BigResponse()
+
+        monkeypatch.setattr("workflow_engine.httpx.AsyncClient", BigClient)
+        logged = []
+
+        async def capture_log(node_id, status, message):
+            logged.append(message)
+
+        result = await execute_node({"id": "h2", "type": "http", "config": {"url": "https://x/y"}},
+                                    {}, send_log=capture_log)
+        assert len(result["output"]) == workflow_engine.MAX_HTTP_OUTPUT_CHARS
+        assert any("截断" in m for m in logged)
+
+    async def test_http_node_accepts_a_url_that_is_not_a_string(self, monkeypatch):
+        seen = {}
+
+        class OkResponse:
+            status_code = 200
+            text = "fine"
+            is_error = False
+
+        class OkClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def request(self, method, url, headers=None, content=None):
+                seen["url"] = url
+                return OkResponse()
+
+        monkeypatch.setattr("workflow_engine.httpx.AsyncClient", OkClient)
+        result = await execute_node({"id": "h3", "type": "http", "config": {"url": " https://x/y "}}, {})
+        assert seen["url"] == "https://x/y"
+        assert result["status"] == "success"

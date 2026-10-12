@@ -408,3 +408,117 @@ async def test_service_worker_script_must_be_revalidated(client):
     assert res.status_code == 200
     assert "no-cache" in res.headers["cache-control"]
     assert "CACHE_NAME" in res.text
+
+
+async def test_create_rejects_a_node_that_is_not_an_object(client):
+    res = await client.post("/api/workflows", json={"name": "ghost", "nodes": ["notadict"], "edges": []})
+    assert res.status_code == 400
+    assert "不是对象" in res.json()["detail"]
+
+
+async def test_create_rejects_a_node_without_a_type(client):
+    res = await client.post("/api/workflows", json={"name": "no type", "nodes": [{"id": "a"}], "edges": []})
+    assert res.status_code == 400
+    assert "缺少 type" in res.json()["detail"]
+
+
+async def test_create_allows_an_empty_canvas(client):
+    res = await client.post("/api/workflows", json={"name": "blank", "nodes": [], "edges": []})
+    assert res.status_code == 200
+
+
+async def test_update_rejects_a_dangling_edge_and_keeps_the_graph(client):
+    created = await client.post("/api/workflows", json={
+        "name": "edges",
+        "nodes": [{"id": "a", "type": "start", "config": {}}, {"id": "b", "type": "end", "config": {}}],
+        "edges": [{"source": "a", "target": "b"}],
+    })
+    wf_id = created.json()["id"]
+
+    res = await client.put(f"/api/workflows/{wf_id}", json={
+        "nodes": [{"id": "a", "type": "start", "config": {}}],
+        "edges": [{"source": "a", "target": "b"}],
+    })
+    assert res.status_code == 400
+    assert "不存在的节点" in res.json()["detail"]
+
+    # The rejected save must not have taken anything away.
+    stored = await client.get(f"/api/workflows/{wf_id}")
+    assert len(stored.json()["nodes"]) == 2
+    assert len(stored.json()["edges"]) == 1
+
+
+async def test_update_rejects_a_non_dict_config(client):
+    created = await client.post("/api/workflows", json={"name": "cfg", "nodes": [], "edges": []})
+    wf_id = created.json()["id"]
+    res = await client.put(f"/api/workflows/{wf_id}", json={
+        "nodes": [{"id": "a", "type": "llm", "config": "prompt = hi"}, {"id": "b", "type": "end", "config": {}}],
+        "edges": [{"source": "a", "target": "b"}],
+    })
+    assert res.status_code == 400
+    assert "config 不是对象" in res.json()["detail"]
+
+
+async def test_update_rejects_a_non_numeric_position(client):
+    created = await client.post("/api/workflows", json={"name": "pos", "nodes": [], "edges": []})
+    wf_id = created.json()["id"]
+    res = await client.put(f"/api/workflows/{wf_id}", json={
+        "nodes": [{"id": "a", "type": "start", "x": "NaN", "y": 2, "config": {}}], "edges": [],
+    })
+    assert res.status_code == 400
+    assert "坐标" in res.json()["detail"]
+
+
+async def test_update_accepts_a_rename_without_touching_the_graph(client):
+    created = await client.post("/api/workflows", json={
+        "name": "rename me",
+        "nodes": [{"id": "a", "type": "start", "config": {}}, {"id": "b", "type": "end", "config": {}}],
+        "edges": [{"source": "a", "target": "b"}],
+    })
+    wf_id = created.json()["id"]
+    res = await client.put(f"/api/workflows/{wf_id}", json={"name": "renamed"})
+    assert res.status_code == 200
+    stored = await client.get(f"/api/workflows/{wf_id}")
+    assert stored.json()["name"] == "renamed"
+    assert len(stored.json()["nodes"]) == 2
+
+
+async def test_single_node_test_rejects_an_unrunnable_node(client):
+    res = await client.post("/api/nodes/execute", json={"node": {"id": "a"}, "context": {}})
+    assert res.status_code == 400
+    assert "缺少 type" in res.json()["detail"]
+
+    res = await client.post("/api/nodes/execute", json={"node": "notadict", "context": {}})
+    assert res.status_code == 422
+
+
+async def test_single_node_test_reports_an_unknown_type_as_an_error(client):
+    res = await client.post("/api/nodes/execute", json={"node": {"id": "a", "type": "magic", "config": {}}, "context": {}})
+    assert res.status_code == 400
+    assert "类型" in res.json()["detail"]
+
+
+def test_startup_closes_out_runs_the_previous_process_left_behind():
+    """A row stuck at 运行中 can be neither deleted nor stopped, so boot has to settle it."""
+    from models import SessionLocal, Execution
+    import main as main_module
+
+    db = SessionLocal()
+    try:
+        orphan = Execution(workflow_id=1, status="running", input_data={}, logs=[])
+        db.add(orphan)
+        db.commit()
+        orphan_id = orphan.id
+    finally:
+        db.close()
+
+    main_module._reconcile_orphan_executions()
+
+    db = SessionLocal()
+    try:
+        row = db.query(Execution).filter(Execution.id == orphan_id).first()
+        assert row.status == "error"
+        assert row.finished_at is not None
+        assert any("中断" in log["message"] for log in (row.logs or []))
+    finally:
+        db.close()

@@ -220,3 +220,61 @@ class TestWebSocketGate:
         client = TestClient(main.app, cookies={auth.SESSION_COOKIE: token})
         with client.websocket_connect(f"/ws/execute/{exec_id}") as ws:
             assert ws.receive_json()["type"] == "snapshot"
+
+
+class TestDailyBudgetCoversEveryModelPath:
+    """The cap exists to protect the account's quota, so no endpoint that reaches the
+    model may spend tokens outside it."""
+
+    @pytest.fixture(autouse=True)
+    def two_runs_a_day(self, monkeypatch):
+        """DAILY_RUNS reads its cap when the module is imported, so the env var only
+        helps a real process; the live object is patched here instead."""
+        monkeypatch.setattr(auth.DAILY_RUNS, "hard_max", 2)
+        auth.DAILY_RUNS.reset()
+        # The budget counts calls, not answers — stubbing keeps this suite from
+        # spending quota and from needing an API key in CI.
+        monkeypatch.setattr("workflow_engine.call_llm", lambda *args, **kwargs: "stubbed")
+        monkeypatch.setattr(main, "decompose_task", lambda task: ["步骤一"])
+
+    async def test_single_node_test_is_charged(self, client, gated):
+        await _login(client)
+
+        text_node = {"id": "n1", "type": "text", "config": {"operation": "concat", "texts": ["x"]}}
+        for _ in range(3):
+            assert (await client.post("/api/nodes/execute", json={"node": text_node, "context": {}})).status_code == 200
+
+        llm_node = {"id": "n2", "type": "llm", "config": {"prompt": "hi"}}
+        for _ in range(2):
+            assert (await client.post("/api/nodes/execute", json={"node": llm_node, "context": {}})).status_code == 200
+
+        res = await client.post("/api/nodes/execute", json={"node": llm_node, "context": {}})
+        assert res.status_code == 429
+        assert "今天" in res.json()["detail"]
+
+    async def test_decompose_is_charged(self, client, gated):
+        await _login(client)
+
+        assert (await client.post("/api/decompose", json={"task": "写个客服流程"})).status_code == 200
+        assert (await client.post("/api/decompose", json={"task": "再来一个"})).status_code == 200
+        assert (await client.post("/api/decompose", json={"task": "第三个"})).status_code == 429
+
+    async def test_a_rejected_workflow_does_not_spend_the_budget(self, client, gated):
+        await _login(client)
+
+        broken = await client.post("/api/workflows", json={
+            "name": "broken",
+            "nodes": [{"id": "a", "type": "start", "config": {}}, {"id": "b", "type": "llm", "config": {}}],
+            "edges": [{"source": "a", "target": "b"}],
+        })
+        wf_id = broken.json()["id"]
+        for _ in range(3):
+            res = await client.post(f"/api/workflows/{wf_id}/execute", json={"input": {"input": "hi"}})
+            assert res.status_code == 400
+        assert auth.DAILY_RUNS.remaining == 2
+
+        good = await client.post("/api/workflows", json={"name": "ok", **GRAPH})
+        assert (await client.post(
+            f"/api/workflows/{good.json()['id']}/execute", json={"input": {"input": "hi"}}
+        )).status_code == 200
+        assert auth.DAILY_RUNS.remaining == 1

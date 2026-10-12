@@ -105,7 +105,41 @@ def _safe_eval_condition(expr: str, context: dict):
     return bool(result)
 
 
+def _cfg(node: dict) -> dict:
+    """A config that is not an object would make every executor raise AttributeError.
+
+    The API refuses such a graph now, but a row written before that check exists can
+    still come back from the database, and a crash there reads as a server bug.
+    """
+    cfg = node.get("config")
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def _as_prompt(value) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return "" if value is None else str(value)
+
+
+def _as_temperature(value, default: float = 0.7) -> float:
+    """Never let a stray value reach the provider: an unparseable temperature becomes
+    the default, an out-of-range one is clamped, and both say so in the log."""
+    try:
+        temperature = float(value)
+    except (TypeError, ValueError):
+        logger.warning("Temperature is not a number (%r), using %s", value, default)
+        return default
+    clamped = max(0.0, min(temperature, 2.0))
+    if clamped != temperature:
+        logger.warning("Temperature %s clamped to %s", temperature, clamped)
+    return clamped
+
+
 async def execute_node(node: dict, context: dict, send_log=None) -> dict:
+    if not isinstance(node, dict):
+        return {"status": "error", "output": f"节点不是对象: {type(node).__name__}"}
     node_type = node.get("type", "llm")
     node_id = node.get("id", "unknown")
     node_title = node.get("title", node_type)
@@ -130,7 +164,7 @@ async def execute_node(node: dict, context: dict, send_log=None) -> dict:
         elif node_type == "end":
             result = {"output": context.get("final_output", "工作流执行完成")}
         else:
-            result = {"output": f"未知节点类型: {node_type}"}
+            raise ValueError(f"未知节点类型: {node_type}")
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         note = result.get("note") or ""
@@ -150,9 +184,10 @@ async def execute_node(node: dict, context: dict, send_log=None) -> dict:
 
 
 async def _exec_llm(node: dict, context: dict) -> dict:
-    prompt = node.get("config", {}).get("prompt", "")
-    model = node.get("config", {}).get("model", "qwen-plus")
-    temperature = node.get("config", {}).get("temperature", 0.7)
+    cfg = _cfg(node)
+    prompt = _as_prompt(cfg.get("prompt", ""))
+    model = cfg.get("model", "qwen-plus")
+    temperature = _as_temperature(cfg.get("temperature", 0.7))
 
     prompt = _replace_vars(prompt, context)
 
@@ -163,7 +198,7 @@ async def _exec_llm(node: dict, context: dict) -> dict:
 
 
 async def _exec_condition(node: dict, context: dict) -> dict:
-    condition = node.get("config", {}).get("condition", "")
+    condition = _as_prompt(_cfg(node).get("condition", ""))
     condition = _replace_vars(condition, context)
 
     try:
@@ -176,15 +211,38 @@ async def _exec_condition(node: dict, context: dict) -> dict:
     return {"output": branch, "branch": branch, "note": f"分支 → {branch}"}
 
 
+# A response is kept as one string in the execution row, so an uncapped body becomes
+# both the process memory and the database.
+MAX_HTTP_OUTPUT_CHARS = 200_000
+
+# Not a general SSRF filter — the demo's own self-check node calls 127.0.0.1, and any
+# node here is written by the person who owns the instance. These few addresses are
+# separate: they hand out the machine's cloud credentials to whoever asks.
+BLOCKED_HTTP_HOSTS = {
+    "169.254.169.254", "metadata.google.internal", "metadata.goog", "100.100.100.200",
+}
+
+
+def _check_http_target(url: str) -> None:
+    try:
+        host = httpx.URL(url).host
+    except Exception:
+        raise ValueError(f"请求地址无法解析: {url[:80]}")
+    if host.lower() in BLOCKED_HTTP_HOSTS:
+        raise ValueError(f"该地址是云厂商的元数据服务，不允许请求: {host}")
+
+
 async def _exec_http(node: dict, context: dict) -> dict:
-    cfg = node.get("config", {})
-    url = _replace_vars(cfg.get("url", ""), context)
+    cfg = _cfg(node)
+    url = _as_prompt(cfg.get("url", ""))
+    url = _replace_vars(url, context).strip()
     method = str(cfg.get("method", "GET")).upper()
     headers = _as_headers(cfg.get("headers", {}))
-    body = _replace_vars(cfg.get("body", ""), context)
+    body = _replace_vars(_as_prompt(cfg.get("body", "")), context)
 
     if not url:
         raise ValueError("HTTP 节点未配置请求地址")
+    _check_http_target(url)
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         resp = await client.request(
@@ -197,11 +255,17 @@ async def _exec_http(node: dict, context: dict) -> dict:
     if resp.is_error and cfg.get("fail_on_error", True):
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:200]}")
 
-    return {"output": resp.text, "status_code": resp.status_code, "note": f"{method} {resp.status_code}"}
+    text = resp.text
+    note = f"{method} {resp.status_code}"
+    if len(text) > MAX_HTTP_OUTPUT_CHARS:
+        text = text[:MAX_HTTP_OUTPUT_CHARS]
+        note += f"，响应已截断到 {MAX_HTTP_OUTPUT_CHARS // 1000}k 字符"
+
+    return {"output": text, "status_code": resp.status_code, "note": note}
 
 
 async def _exec_loop(node: dict, context: dict) -> dict:
-    cfg = node.get("config", {})
+    cfg = _cfg(node)
     items = _as_list(_replace_vars(cfg.get("source", "{{input}}"), context), _unescape(cfg.get("separator", "\n")))
 
     try:
@@ -220,7 +284,7 @@ async def _exec_loop(node: dict, context: dict) -> dict:
 
     template = cfg.get("prompt", "{{item}}")
     model = cfg.get("model", "qwen-plus")
-    temperature = float(cfg.get("temperature", 0.5))
+    temperature = _as_temperature(cfg.get("temperature", 0.5), 0.5)
     semaphore = asyncio.Semaphore(3)
     loop = asyncio.get_running_loop()
 
@@ -247,21 +311,34 @@ async def _exec_loop(node: dict, context: dict) -> dict:
     return {"output": join.join(results), "note": f"{len(items)} 项" + (f"，{len(failures)} 项失败" if failures else "")}
 
 
-async def _exec_text(node: dict, context: dict) -> dict:
-    operation = node.get("config", {}).get("operation", "concat")
-    texts = node.get("config", {}).get("texts", [])
+def _as_text_list(texts) -> list:
+    """The panel writes an array; a hand-written graph can put a bare string here, and
+    iterating that silently turns 「hello」 into five one-character items."""
+    if isinstance(texts, str):
+        return [texts]
+    if isinstance(texts, (list, tuple)):
+        return list(texts)
+    if texts is None:
+        return []
+    raise ValueError(f"文本处理的 texts 需要是数组或字符串，当前是 {type(texts).__name__}")
 
-    processed = [_replace_vars(t, context) for t in texts]
+
+async def _exec_text(node: dict, context: dict) -> dict:
+    cfg = _cfg(node)
+    operation = cfg.get("operation", "concat")
+    texts = _as_text_list(cfg.get("texts", []))
+
+    processed = [_as_prompt(_replace_vars(t, context)) for t in texts]
 
     if operation == "concat":
         return {"output": "".join(processed)}
     elif operation == "split":
-        separator = _unescape(node.get("config", {}).get("separator", "\n"))
+        separator = _unescape(_cfg(node).get("separator", "\n"))
         return {"output": processed[0].split(separator) if processed else []}
     elif operation == "replace":
         text = processed[0] if processed else ""
-        old = node.get("config", {}).get("old", "")
-        new = node.get("config", {}).get("new", "")
+        old = _cfg(node).get("old", "")
+        new = _cfg(node).get("new", "")
         return {"output": text.replace(old, new)}
     else:
         return {"output": processed[0] if processed else ""}
@@ -348,10 +425,20 @@ REQUIRED_CONFIG = {
 NODE_ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]{0,63}$")
 
 
-def validate_graph_shape(nodes: list, edges: list) -> list[str]:
-    """Structural checks only, so an imported draft is never rejected for being unfinished."""
-    if not isinstance(nodes, list) or not nodes:
-        return ["文件里没有节点"]
+def _known_node_types() -> set:
+    from node_types import NODE_TYPES
+
+    return set(NODE_TYPES)
+
+
+def validate_graph_shape(nodes: list, edges: list, allow_empty: bool = False) -> list[str]:
+    """Structural checks only, so an imported draft is never rejected for being unfinished.
+
+    allow_empty covers the editor's own empty canvas: a brand-new workflow is saved with
+    no nodes, and refusing that would make the first autosave fail.
+    """
+    if not isinstance(nodes, list) or (not nodes and not allow_empty):
+        return ["文件里没有节点"] if not allow_empty else []
 
     problems = []
     ids = []
@@ -371,6 +458,19 @@ def validate_graph_shape(nodes: list, edges: list) -> list[str]:
             ids.append(node_id)
         if not node.get("type"):
             problems.append(f"节点「{node_id or index + 1}」缺少 type")
+        elif node["type"] not in _known_node_types():
+            # A type the palette does not offer cannot be drawn, configured or run, so
+            # accepting it only produced a blank box on the canvas that no later save
+            # could get rid of.
+            problems.append(f"节点「{node_id or index + 1}」类型未知: {node['type']}")
+        if "config" in node and not isinstance(node["config"], dict):
+            # Every executor reads config.get(...); a string here turns 检查 and 运行
+            # into a 500 instead of a message.
+            problems.append(f"节点「{node_id or index + 1}」的 config 不是对象")
+        for axis in ("x", "y"):
+            value = node.get(axis, 0)
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value != value:
+                problems.append(f"节点「{node_id or index + 1}」的坐标 {axis} 不是数字")
 
     duplicated = sorted({i for i in ids if ids.count(i) > 1})
     if duplicated:
@@ -425,7 +525,7 @@ def validate_workflow(nodes: list, edges: list) -> list[str]:
             problems.append(f"节点「{label}」类型未知: {node_type}")
             continue
         key, field = REQUIRED_CONFIG.get(node_type, (None, None))
-        if key and not str(node.get("config", {}).get(key, "")).strip():
+        if key and not str(_cfg(node).get(key, "")).strip():
             problems.append(f"节点「{label}」未填写{field}")
 
     for edge in edges:
