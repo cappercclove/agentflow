@@ -630,6 +630,17 @@ body {
   pointer-events: none;
 }
 
+.edge-temp {
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  fill: none;
+  opacity: 0.75;
+  stroke-dasharray: 5 5;
+  stroke-linecap: round;
+  animation: edgeFlow 0.6s linear infinite;
+  pointer-events: none;
+}
+
 @keyframes edgeFlow {
   from { stroke-dashoffset: 20; }
   to { stroke-dashoffset: 0; }

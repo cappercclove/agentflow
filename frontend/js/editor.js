@@ -92,7 +92,7 @@ function restoreHistory() {
   editorNodes = JSON.parse(JSON.stringify(state.nodes));
   editorEdges = JSON.parse(JSON.stringify(state.edges));
   selectedNode = null;
-  connectingPort = null;
+  cancelConnection();
   renderCanvas();
   queueSave(currentWorkflow);
   document.getElementById('prop-content').innerHTML = '<p style="font-size: 13px; color: var(--text-tertiary);">选择节点查看属性</p>';
@@ -114,13 +114,55 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// A connection is armed by the first port and fired by the second. Without this the
-// arming survived a released drag, so the next click on any port completed a line the
-// user meant to start instead — and the highlighted port kept looking selectable.
+// Without this the arming survived a released drag, so the next click on any port
+// completed a line the user meant to start instead — and the highlighted port kept
+// looking selectable.
 function cancelConnection() {
   if (!connectingPort) return;
   connectingPort = null;
   document.querySelectorAll('.node-port.connecting').forEach(p => p.classList.remove('connecting'));
+  removeTempLine();
+}
+
+// A connection is a two-end gesture, and the ends can arrive in either order: a click
+// on this port then a click on that one, or a press here and a release there. Both
+// routes land here so the checks and the feedback are the same either way.
+function completeConnection(end) {
+  const start = connectingPort;
+  if (!start) return;
+
+  if (start.nodeId === end.nodeId) {
+    showToast('不能连接节点自身', 'error');
+    cancelConnection();
+    return;
+  }
+  if (start.kind === end.kind) {
+    showToast('请从输出端口连到另一个节点的输入端口', 'error');
+    cancelConnection();
+    return;
+  }
+
+  const out = start.kind === 'output' ? start : end;
+  const source = out.nodeId;
+  const target = start.kind === 'output' ? end.nodeId : start.nodeId;
+  const sourcePort = out.portName;
+
+  const exists = editorEdges.some(
+    edge => edge.source === source && edge.target === target && (edge.sourcePort || 'output') === sourcePort
+  );
+  cancelConnection();
+  if (exists) {
+    showToast('这两个节点之间已经有连线', 'error');
+    return;
+  }
+
+  editorEdges.push({ source, target, sourcePort });
+  // Recorded after the change, like every other edit: a step that stores the
+  // state before it is a state the canvas is never actually in, so redo had
+  // nothing to land on.
+  pushHistory();
+  renderCanvas();
+  queueSave(currentWorkflow);
 }
 
 async function initEditor() {
@@ -233,42 +275,19 @@ function createNodeElement(node) {
   el.querySelectorAll('.node-port').forEach(port => {
     port.addEventListener('mousedown', (e) => {
       e.stopPropagation();
-      const nodeId = port.dataset.node;
-      const kind = port.dataset.kind;
-      const portName = port.dataset.port;
+      const ref = {
+        nodeId: port.dataset.node,
+        kind: port.dataset.kind,
+        portName: port.dataset.port,
+      };
 
       if (!connectingPort) {
-        connectingPort = { nodeId, kind, portName };
+        connectingPort = ref;
         port.classList.add('connecting');
         return;
       }
 
-      if (connectingPort.nodeId !== nodeId && connectingPort.kind !== kind) {
-        const out = connectingPort.kind === 'output' ? connectingPort : { nodeId, kind, portName };
-        const source = out.nodeId;
-        const target = connectingPort.kind === 'output' ? nodeId : connectingPort.nodeId;
-        const sourcePort = out.portName;
-
-        const exists = editorEdges.some(
-          edge => edge.source === source && edge.target === target && (edge.sourcePort || 'output') === sourcePort
-        );
-        if (!exists) {
-          editorEdges.push({ source, target, sourcePort });
-          // Recorded after the change, like every other edit: a step that stores the
-          // state before it is a state the canvas is never actually in, so redo had
-          // nothing to land on.
-          pushHistory();
-          renderCanvas();
-          queueSave(currentWorkflow);
-        }
-      } else if (connectingPort.nodeId === nodeId) {
-        showToast('不能连接节点自身', 'error');
-      } else {
-        showToast('请从输出端口连到另一个节点的输入端口', 'error');
-      }
-
-      connectingPort = null;
-      document.querySelectorAll('.node-port.connecting').forEach(p => p.classList.remove('connecting'));
+      completeConnection(ref);
     });
   });
 
@@ -285,6 +304,40 @@ function portAnchor(nodeEl, kind, portName) {
   if (!portEl) return null;
   const r = portEl.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+}
+
+function removeTempLine() {
+  const el = document.getElementById('edge-temp');
+  if (el) el.remove();
+}
+
+// The documented gesture is press-and-drag, so the line has to follow the cursor: a
+// drag that ends at the target with nothing drawn on the way looks like nothing
+// happened, and the user releases the mouse believing the connection failed.
+function drawTempLine(e) {
+  const svg = document.getElementById('svg-layer');
+  const canvas = document.getElementById('canvas');
+  if (!svg || !canvas || !connectingPort) return;
+
+  const nodeEl = document.querySelector(`.workflow-node[data-id="${connectingPort.nodeId}"]`);
+  const anchor = nodeEl ? portAnchor(nodeEl, connectingPort.kind, connectingPort.portName) : null;
+  if (!anchor) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const x1 = anchor.x - rect.left;
+  const y1 = anchor.y - rect.top;
+  const x2 = e.clientX - rect.left;
+  const y2 = e.clientY - rect.top;
+  const dx = Math.max(40, Math.abs(x2 - x1) / 2);
+
+  let path = document.getElementById('edge-temp');
+  if (!path) {
+    path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    path.setAttribute('id', 'edge-temp');
+    path.setAttribute('class', 'edge-temp');
+    svg.appendChild(path);
+  }
+  path.setAttribute('d', `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`);
 }
 
 function renderEdges(svg) {
@@ -379,6 +432,10 @@ function setupCanvasEvents() {
 }
 
 document.addEventListener('mousemove', (e) => {
+  if (connectingPort && !draggingNode) {
+    drawTempLine(e);
+    return;
+  }
   if (!draggingNode) return;
 
   const canvas = document.getElementById('canvas');
@@ -405,12 +462,23 @@ document.addEventListener('mouseup', (e) => {
     queueSave(currentWorkflow);
   }
   draggingNode = null;
-  // Released somewhere that is not a port means the drag did not complete, so the
-  // arming is dropped. Releasing over a port keeps it, which is what lets a click on
-  // the source port followed by a click on the target still connect the two.
+
   const hit = e.target;
   const onPort = hit && hit.classList && hit.classList.contains('node-port');
-  if (connectingPort && !onPort) cancelConnection();
+  if (!connectingPort) return;
+  // Releasing over the port that armed the connection is the tail of the first click
+  // of a click-then-click, so it stays armed. Anywhere else the gesture is over: on a
+  // different port it tries to connect, off the ports it cancels.
+  const samePort = onPort
+    && hit.dataset.node === connectingPort.nodeId
+    && hit.dataset.kind === connectingPort.kind
+    && hit.dataset.port === connectingPort.portName;
+  if (samePort) return;
+  if (onPort) {
+    completeConnection({ nodeId: hit.dataset.node, kind: hit.dataset.kind, portName: hit.dataset.port });
+    return;
+  }
+  cancelConnection();
 });
 
 function selectNode(nodeId) {
