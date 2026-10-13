@@ -695,6 +695,14 @@ body {
   color: var(--text-tertiary);
 }
 
+.property-textarea.invalid {
+  border-color: var(--red);
+}
+
+.property-textarea.invalid + .property-hint {
+  color: var(--red);
+}
+
 .property-hint code {
   background: var(--bg-muted);
   border: 1px solid var(--border);

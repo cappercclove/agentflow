@@ -1,5 +1,5 @@
 import os
-from openai import OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI
 
 _client_cache = {}
 
@@ -24,14 +24,28 @@ def _get_model_map():
 
 
 def call_llm(prompt: str, model: str = "qwen-plus", temperature: float = 0.7) -> str:
-    model_name = _get_model_map().get(model, model)
-    client = get_client(model)
-    response = client.chat.completions.create(
-        model=model_name,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=temperature,
-        max_tokens=2048,
-    )
+    # The panel writes a string here; an imported graph can put a number or null, and
+    # the SDK rejects anything that is not a str with an error nobody can trace back
+    # to the model field.
+    model_id = model if isinstance(model, str) and model.strip() else "qwen-plus"
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("提示词为空，无法调用模型")
+    model_name = _get_model_map().get(model_id, model_id)
+    client = get_client(model_id)
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+            max_tokens=2048,
+        )
+    except APIConnectionError as e:
+        # What the SDK says ("Connection error.") is true but useless next to a
+        # canvas: the user needs to know the model service is unreachable, not that
+        # a Python class raised.
+        raise RuntimeError(f"无法连接大模型服务，请检查网络或接口地址：{e}") from e
+    except APIStatusError as e:
+        raise RuntimeError(f"大模型服务返回 {e.status_code}：{str(e)[:200]}") from e
     choices = response.choices or []
     # A content-filtered or truncated completion can come back with no choices at
     # all, or with message.content = None. Both used to raise AttributeError here

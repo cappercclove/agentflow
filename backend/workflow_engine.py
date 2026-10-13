@@ -266,7 +266,10 @@ async def _exec_http(node: dict, context: dict) -> dict:
 
 async def _exec_loop(node: dict, context: dict) -> dict:
     cfg = _cfg(node)
-    items = _as_list(_replace_vars(cfg.get("source", "{{input}}"), context), _unescape(cfg.get("separator", "\n")))
+    items = _as_list(
+        _replace_vars(cfg.get("source", "{{input}}"), context),
+        _as_separator(cfg.get("separator"), "分隔符", "\n"),
+    )
 
     try:
         max_items = max(1, min(int(cfg.get("max_items", 20) or 20), 100))
@@ -277,7 +280,7 @@ async def _exec_loop(node: dict, context: dict) -> dict:
     if not items:
         return {"output": "", "note": "0 项"}
 
-    join = _unescape(cfg.get("join", "\n\n"))
+    join = _as_separator(cfg.get("join"), "结果连接符", "\n\n")
 
     if cfg.get("action", "llm") != "llm":
         return {"output": join.join(items), "note": f"{len(items)} 项"}
@@ -333,12 +336,12 @@ async def _exec_text(node: dict, context: dict) -> dict:
     if operation == "concat":
         return {"output": "".join(processed)}
     elif operation == "split":
-        separator = _unescape(_cfg(node).get("separator", "\n"))
+        separator = _as_separator(_cfg(node).get("separator"), "分隔符", "\n")
         return {"output": processed[0].split(separator) if processed else []}
     elif operation == "replace":
         text = processed[0] if processed else ""
-        old = _cfg(node).get("old", "")
-        new = _cfg(node).get("new", "")
+        old = _as_text_field(_cfg(node).get("old"), "查找") or ""
+        new = _as_text_field(_cfg(node).get("new"), "替换为") or ""
         return {"output": text.replace(old, new)}
     else:
         return {"output": processed[0] if processed else ""}
@@ -348,6 +351,21 @@ def _unescape(text: str) -> str:
     if not isinstance(text, str):
         return text
     return text.replace("\\n", "\n").replace("\\t", "\t").replace("\\r", "")
+
+
+def _as_text_field(value, field: str):
+    """A separator or a replacement pair is text by nature, and the panel only ever
+    writes text into it. An imported graph can carry 5 or ["a"] here, which used to
+    raise str.split's own TypeError — so the user read 「must be str or None, not
+    list」 as if the server had broken, with no hint of which field to fix."""
+    if value is None or isinstance(value, str):
+        return value
+    raise ValueError(f"「{field}」需要是文本，当前是 {type(value).__name__}")
+
+
+def _as_separator(value, field: str, default: str) -> str:
+    text = _as_text_field(value, field)
+    return default if text is None else _unescape(text)
 
 
 def _as_list(value, separator: str) -> list:
@@ -383,6 +401,10 @@ def _as_headers(headers) -> dict:
         if not isinstance(parsed, dict):
             raise ValueError("请求头需为 JSON 对象")
         return {str(k): str(v) for k, v in parsed.items()}
+    if headers not in (None, "", {}, []):
+        # Dropping it quietly would run the request without the headers the user
+        # can see in the panel, which is worse than refusing.
+        raise ValueError(f"请求头需为 JSON 对象，当前是 {type(headers).__name__}")
     return {}
 
 
@@ -525,8 +547,13 @@ def validate_workflow(nodes: list, edges: list) -> list[str]:
             problems.append(f"节点「{label}」类型未知: {node_type}")
             continue
         key, field = REQUIRED_CONFIG.get(node_type, (None, None))
-        if key and not str(_cfg(node).get(key, "")).strip():
-            problems.append(f"节点「{label}」未填写{field}")
+        if key:
+            value = _cfg(node).get(key)
+            # An explicit null reads as "" through str() but "None" through the old
+            # str(value), so a hand-written graph with "prompt": null passed 检查 and
+            # then asked the model for nothing.
+            if value is None or not str(value).strip():
+                problems.append(f"节点「{label}」未填写{field}")
 
     for edge in edges:
         for endpoint in ("source", "target"):

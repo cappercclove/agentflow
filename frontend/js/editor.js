@@ -560,7 +560,8 @@ function selectNode(nodeId) {
         </div>
         <div class="property-group">
           <label class="property-label">请求头（JSON）</label>
-          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${escapeJsAttr(nodeId)}', 'headers', this.value)">${escapeHtml(JSON.stringify(node.config.headers ?? {}, null, 2))}</textarea>
+          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${escapeJsAttr(nodeId)}', 'headers', this.value, this)">${escapeHtml(JSON.stringify(node.config.headers ?? {}, null, 2))}</textarea>
+          <div class="property-hint" hidden>不是合法的 JSON，这段改动没有保存。</div>
         </div>
         ${node.config.method === 'GET' ? '' : `
         <div class="property-group">
@@ -592,7 +593,8 @@ function selectNode(nodeId) {
         </div>
         <div class="property-group">
           <label class="property-label">文本片段（JSON 数组）</label>
-          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${escapeJsAttr(nodeId)}', 'texts', this.value)">${escapeHtml(JSON.stringify(node.config.texts ?? [], null, 2))}</textarea>
+          <textarea class="property-textarea property-mono" oninput="updateNodeJson('${escapeJsAttr(nodeId)}', 'texts', this.value, this)">${escapeHtml(JSON.stringify(node.config.texts ?? [], null, 2))}</textarea>
+          <div class="property-hint" hidden>不是合法的 JSON，这段改动没有保存。</div>
         </div>
         ${node.config.operation === 'split' ? `
         <div class="property-group">
@@ -666,14 +668,21 @@ function updateNodeConfig(nodeId, key, value) {
   }
 }
 
-function updateNodeJson(nodeId, key, raw) {
+function updateNodeJson(nodeId, key, raw, field) {
   const node = editorNodes.find(n => n.id === nodeId);
   if (!node) return;
+  const hint = field ? field.parentElement.querySelector('.property-hint') : null;
   try {
     node.config[key] = JSON.parse(raw);
   } catch (e) {
+    // The box still shows what the user typed, so without this the field looks
+    // configured while the saved graph keeps the previous value.
+    if (field) field.classList.add('invalid');
+    if (hint) hint.hidden = false;
     return;
   }
+  if (field) field.classList.remove('invalid');
+  if (hint) hint.hidden = true;
   scheduleSave();
 }
 

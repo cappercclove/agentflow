@@ -732,3 +732,141 @@ class TestNodeGuards:
         result = await execute_node({"id": "h3", "type": "http", "config": {"url": " https://x/y "}}, {})
         assert seen["url"] == "https://x/y"
         assert result["status"] == "success"
+
+
+class TestTextFieldGuards:
+    """A number where the engine needs text used to leak str's own TypeError."""
+
+    async def test_loop_join_names_the_field_instead_of_crashing(self):
+        result = await execute_node(
+            {"id": "l", "type": "loop", "config": {"source": "{{input}}", "action": "collect", "join": 5}},
+            {"input": "a\nb"},
+        )
+        assert result["status"] == "error"
+        assert "结果连接符" in result["output"]
+        assert "int" in result["output"]
+
+    async def test_loop_separator_names_the_field_instead_of_crashing(self):
+        result = await execute_node(
+            {"id": "l", "type": "loop", "config": {"source": "{{input}}", "action": "collect", "separator": [","]}},
+            {"input": "a,b"},
+        )
+        assert result["status"] == "error"
+        assert "「分隔符」需要是文本" in result["output"]
+
+    async def test_text_split_separator_is_reported_per_node(self):
+        result = await execute_node(
+            {"id": "t", "type": "text", "config": {"operation": "split", "texts": ["{{input}}"], "separator": 1}},
+            {"input": "a b"},
+        )
+        assert result["status"] == "error"
+        assert "分隔符" in result["output"]
+
+    async def test_text_replace_pair_must_be_text(self):
+        result = await execute_node(
+            {"id": "t", "type": "text",
+             "config": {"operation": "replace", "texts": ["abc"], "old": 1, "new": "x"}},
+            {},
+        )
+        assert result["status"] == "error"
+        assert "查找" in result["output"]
+
+    async def test_missing_separator_still_uses_the_default(self):
+        result = await execute_node(
+            {"id": "l", "type": "loop", "config": {"source": "{{input}}", "action": "collect", "join": None}},
+            {"input": "a\nb"},
+        )
+        assert result["output"] == "a\n\nb"
+
+    async def test_http_headers_of_an_unusable_type_are_refused(self, monkeypatch):
+        class ExplodingClient:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                raise AssertionError("the request must not go out with headers the panel cannot show")
+
+            async def __aexit__(self, *exc):
+                return False
+
+        monkeypatch.setattr("workflow_engine.httpx.AsyncClient", ExplodingClient)
+        for bad in [123, True, ["a=b"]]:
+            result = await execute_node(
+                {"id": "h", "type": "http", "config": {"url": "https://x/y", "headers": bad}}, {})
+            assert result["status"] == "error", bad
+            assert "请求头" in result["output"], bad
+
+    async def test_empty_headers_stay_quiet(self):
+        from workflow_engine import _as_headers
+
+        assert _as_headers(None) == {}
+        assert _as_headers("") == {}
+        assert _as_headers({}) == {}
+
+
+class TestRequiredConfigPresence:
+    def test_an_explicit_null_counts_as_missing(self):
+        # str(None) is "None", so this passed 检查 and then asked the model for nothing.
+        nodes = [
+            {"id": "start", "type": "start", "config": {}},
+            {"id": "c", "type": "condition", "config": {"condition": None}},
+            {"id": "l", "type": "llm", "config": {"prompt": None}},
+            {"id": "end", "type": "end", "config": {}},
+        ]
+        edges = [
+            {"source": "start", "target": "c"},
+            {"source": "c", "target": "l", "sourcePort": "true"},
+            {"source": "l", "target": "end"},
+        ]
+        problems = validate_workflow(nodes, edges)
+        assert any("未填写条件表达式" in p for p in problems)
+        assert any("未填写提示词" in p for p in problems)
+
+
+class TestLlmFailureMessages:
+    def test_a_number_for_the_model_falls_back_to_the_default_tier(self, monkeypatch):
+        from types import SimpleNamespace
+        import llm_client
+
+        asked = {}
+
+        def create(model=None, **_kw):
+            asked["model"] = model
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))])
+
+        monkeypatch.setattr(llm_client, "get_client", lambda model=None: SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
+        for bad in [12, None, "  "]:
+            assert llm_client.call_llm("hi", bad) == "ok"
+            assert asked["model"] == "qwen-plus", bad
+
+    def test_an_empty_prompt_is_refused_before_the_request(self, monkeypatch):
+        import llm_client
+
+        monkeypatch.setattr(llm_client, "get_client",
+                            lambda model=None: (_ for _ in ()).throw(AssertionError("no call expected")))
+        for bad in ["", "   ", None]:
+            try:
+                llm_client.call_llm(bad)
+            except ValueError as e:
+                assert "提示词为空" in str(e)
+            else:
+                raise AssertionError(f"prompt {bad!r} should not reach the provider")
+
+    def test_a_connection_failure_is_explained_in_chinese(self, monkeypatch):
+        from types import SimpleNamespace
+        import httpx
+        import llm_client
+        from openai import APIConnectionError
+
+        def boom(**_kw):
+            raise APIConnectionError(request=httpx.Request("POST", "https://x/y"))
+
+        monkeypatch.setattr(llm_client, "get_client", lambda model=None: SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=boom))))
+        try:
+            llm_client.call_llm("hi")
+        except RuntimeError as e:
+            assert "无法连接大模型服务" in str(e)
+        else:
+            raise AssertionError("a dead endpoint should raise a readable error")
