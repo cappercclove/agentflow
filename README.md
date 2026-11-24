@@ -13,12 +13,9 @@
 
 条件节点的两个出口分别画线，未选中的分支在执行日志里记为「跳过」。
 
-> **在线演示**：<http://47.101.60.110:8001>（阿里云轻量应用服务器，华东2-上海）
-> 打开后会先进口令页，访问口令随简历/作品册一并提供，不在仓库里公开。
-> 会话 12 小时有效；未登录时 `/api/*` 一律 401，WebSocket 握手被拒。
-> 实例里预置了三条示例工作流，每条都真的跑通过（分支路由、批量循环、HTTP 自检），执行记录可以直接翻看。
-> 重新播种：`python3 deploy/seed_demo.py`。
-> 部署有效期到服务器到期日为止，如果链接打不开请直接用本地方式运行。
+> **怎么跑起来看**：`cd backend && python -m uvicorn main:app --port 8000` → <http://localhost:8000>，需要一个阿里云百炼 API Key 填进 `backend/.env` 的 `BAILIAN_API_KEY`；不想开终端就 `npm install && npm start` 起桌面版。
+> **在线演示已下线**：这里原先挂过一台公网演示机（阿里云轻量应用服务器，华东2-上海），租期到 2026-11-11，到期后未续费、现已停机，所以不再挂死链。
+> 那台机器的部署方式仍在仓库里可复现：`deploy/` 的 compose 一键起，开启 `AGENTFLOW_ACCESS_CODE` 后访客先过口令页、未登录 `/api/*` 一律 401、WebSocket 握手被拒、按 IP 限流并带每日运行额度，`python3 deploy/seed_demo.py` 播种三条示例工作流（分支路由、批量循环、HTTP 自检，每条都真的跑通过，执行记录可直接翻看）。
 
 ---
 
@@ -348,8 +345,8 @@ agentflow/
 - [ ] 支持子工作流调用
 - [ ] 用户认证与多用户管理
 - [ ] 工作流版本控制
-- [x] 公网部署：访问口令与按 IP 限流、反代模板、容器日志轮转与 SQLite 备份脚本（演示实例已在阿里云轻量服务器上线）
-- [ ] 有域名之后补 HTTPS（现在只有 HTTP，IP 直连 8001）
+- [x] 公网部署：访问口令与按 IP 限流、反代模板、容器日志轮转与 SQLite 备份脚本（曾在阿里云轻量服务器上跑过一台演示实例，2026-11-11 租期到期后未续费、已下线）
+- [ ] 有域名之后补 HTTPS（`deploy/` 里的反代模板已按 HTTP + IP 直连 8001 写，没备案所以没挂 443）
 
 ---
 
@@ -359,7 +356,8 @@ agentflow/
 
 AgentFlow is a visual AI workflow orchestration platform. Users build automation workflows by dragging nodes and connecting edges. The system supports intelligent task decomposition, multi-model scheduling, conditional branching, and real-time execution monitoring.
 
-> **Live demo**: <http://47.101.60.110:8001> — hosted on an Alibaba Cloud Simple Application Server (Shanghai). Visitors land on an access-code page first; the code is shared with reviewers rather than committed here. Sessions last 12 hours, unauthenticated `/api/*` calls return 401, and WebSocket handshakes are refused.
+> **Run it locally**: `cd backend && python -m uvicorn main:app --port 8000` → <http://localhost:8000> (set `BAILIAN_API_KEY` in `backend/.env`), or `npm install && npm start` for the desktop build.
+> **The hosted demo is offline.** It ran on an Alibaba Cloud Simple Application Server (Shanghai) behind an access code — unauthenticated `/api/*` returned 401, WebSocket handshakes were refused, and requests were rate-limited per IP with a daily run quota. That instance expired on 2026-11-11 and was not renewed, so no dead link is advertised here. The same deployment is still reproducible from `deploy/` (`docker compose up -d --build`, then `python3 deploy/seed_demo.py` to seed three example workflows — branch routing, batch loop, HTTP self-check — each of which actually ran).
 
 ### ✨ Features
 
